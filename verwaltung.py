@@ -94,7 +94,7 @@ def schreibe_passwort_readme(cfg):
     z.append("> Diese Datei wird von `verwaltung.py` **automatisch aktualisiert** —")
     z.append("> nicht von Hand pflegen. Quelle der Wahrheit: `zugangsdaten.json`.")
     z.append("")
-    z.append(f"**Portal:** https://temmchen.github.io/schuljahr-portal/ · "
+    z.append(f"**Portal:** https://temmchen.github.io/CdM/ · "
              f"**Stand:** {date.today().strftime('%d.%m.%Y')} · "
              f"**Schuljahr:** {cfg.get('schuljahr', '?')}")
     z.append("")

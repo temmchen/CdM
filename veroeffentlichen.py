@@ -195,7 +195,7 @@ def frage(text):
 # ─────────────────────── Hauptablauf ────────────────────────────────────────
 
 def main():
-    sag("🔐 Schuljahr-Portal — Prüfen & Veröffentlichen")
+    sag("🔐 CdM-Portal — Prüfen & Veröffentlichen")
     sag("=" * 46)
     if not KONFIG.is_file():
         sys.exit("zugangsdaten.json fehlt im Portal-Ordner.")
@@ -414,7 +414,7 @@ def main():
     git("push", "-q", "origin", "main")
 
     speichere_stand()
-    sag("\n✅ Fertig! In 1–2 Minuten online: https://temmchen.github.io/schuljahr-portal/")
+    sag("\n✅ Fertig! In 1–2 Minuten online: https://temmchen.github.io/CdM/")
     sag("   (Noten wurden wie immer NICHT hochgeladen.)")
 
 
