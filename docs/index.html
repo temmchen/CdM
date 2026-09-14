@@ -986,14 +986,16 @@ async function adminNeuerProf(){
    Freischalten/Rotieren zusätzlich seinen Admin-Schlüssel (kekw). */
 
 async function alleEmpfaenger(idx, adminKek){
-  /* Admin selbst + alle Profs aus dem Schlüsselbund — Empfänger neuer Vault-Schlüssel */
+  /* Admin + alle Profs + alle Lese-Zugänge aus dem Schlüsselbund.
+     ACHTUNG: Lese-Zugänge ("nutzer") dürfen NUR den Skripte-Tresor bekommen —
+     das filtert die Stelle, die die Wraps schreibt, anhand von e.rolle. */
   const emp = [{ pid: SESSION.pid, kek: adminKek, rolle: "admin", klasse: null, label: SESSION.label }];
   for(const [pid, w] of Object.entries(idx.kekw || {})){
     try{
       const meta = await entwickle(adminKek, w);
-      if(meta.rolle === "prof")
+      if(meta.rolle === "prof" || meta.rolle === "nutzer")
         emp.push({ pid, kek: await importKek(b64zu(meta.kek)),
-                   rolle: "prof", klasse: null, label: meta.label });
+                   rolle: meta.rolle, klasse: null, label: meta.label });
     }catch(e){ /* Eintrag nicht lesbar → überspringen */ }
   }
   return emp;
@@ -1076,7 +1078,7 @@ async function adminNeueKlasse(){
     setze("Leite Klassen-Schlüssel ab …");
     const klassenKekRoh = await leiteKekRoh(passwort, b64ausBytes(salt), idx.kdf.iter);
     const klassenKek = await importKek(klassenKekRoh);
-    setze("Schalte alle Profs frei …");
+    setze("Schalte alle Profs und Lese-Zugänge frei …");
     const empfaenger = await alleEmpfaenger(idx, adminKek);
 
     const faecherMitKeys = faecher.map(f=>({ ...f,
@@ -1091,9 +1093,12 @@ async function adminNeueKlasse(){
       if(typ==="skripte")
         wraps.push({ ...(await wickleEin(klassenKek,
           { k:kB64, rolle:"schueler", klasse:kuerzel, label:`Klasse ${name}` })), p: pid });
-      for(const e of empfaenger)
+      for(const e of empfaenger){
+        // Lese-Zugang: nur Skripte, niemals Prüfungen/Aufgaben/Sonstiges.
+        if(e.rolle === "nutzer" && typ !== "skripte") continue;
         wraps.push({ ...(await wickleEin(e.kek,
           { k:kB64, rolle:e.rolle, klasse:e.klasse, label:e.label })), p: e.pid });
+      }
       const module = {};
       for(const f of faecher) for(const mn of Object.values(f.modul)){
         const mk = mn.replace(/\s+/g,"");
