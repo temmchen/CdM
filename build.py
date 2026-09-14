@@ -247,6 +247,9 @@ def main():
 
     klassen = cfg.get("klassen", [])
     profs = cfg.get("profs", [])
+    # "nutzer": Lese-Zugaenge, die die Skripte ALLER Kurse sehen, aber nichts
+    # Internes (Pruefungen/Aufgaben/Sonstiges) und nichts verwalten duerfen.
+    nutzer = cfg.get("nutzer", [])
     admin = cfg.get("admin")
     if not klassen or not admin:
         sys.exit("zugangsdaten.json braucht mindestens eine Klasse und einen Admin.")
@@ -283,6 +286,8 @@ def main():
         registriere(kl["passwort"], "schueler", kl["key"], f"Klasse {kl['name']}")
     for p in profs:
         registriere(p["passwort"], "prof", None, p.get("name", "Prof"))
+    for n in nutzer:
+        registriere(n["passwort"], "nutzer", None, n.get("name", "Nutzer"))
     registriere(admin["passwort"], "admin", None, admin.get("name", "Admin"))
 
     # ── Beispiel-Inhalte (optional) ──
@@ -408,6 +413,8 @@ def main():
         statistik.append((klasse_cfg["key"], bereich_typ, anzahl, gesamt))
 
     profs_und_admin = [p for p in principals if p["rolle"] in ("prof", "admin")]
+    # Lese-Zugaenge bekommen JEDEN Skripte-Tresor, aber keinen einzigen internen.
+    skripte_leser = [p for p in principals if p["rolle"] == "nutzer"]
 
     for kl in klassen:
         basis = inhalt / kl["key"]
@@ -439,7 +446,8 @@ def main():
                 intern_module[mk] = intern
 
         schueler_zugang = [p for p in principals if p["rolle"] == "schueler" and p["klasse"] == kl["key"]]
-        baue_vault(kl, "skripte", skripte_module, schueler_zugang + profs_und_admin)
+        baue_vault(kl, "skripte", skripte_module,
+                   schueler_zugang + skripte_leser + profs_und_admin)
         baue_vault(kl, "intern", intern_module, profs_und_admin)
 
     # ── Öffentlicher Index (enthält KEIN Geheimnis) ──

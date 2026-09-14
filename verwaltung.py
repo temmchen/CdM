@@ -112,6 +112,14 @@ def schreibe_passwort_readme(cfg):
     z.append("|---|---|")
     for p in cfg.get("profs", []):
         z.append(f"| **{p.get('name', '?')}** | `{p['passwort']}` |")
+    if cfg.get("nutzer"):
+        z.append("")
+        z.append("## 👁️ Lese-Zugänge (sehen die Skripte **aller** Kurse, nichts Internes)")
+        z.append("")
+        z.append("| Name | Passwort |")
+        z.append("|---|---|")
+        for n in cfg["nutzer"]:
+            z.append(f"| **{n.get('name', '?')}** | `{n['passwort']}` |")
     a = cfg.get("admin", {})
     z.append("")
     z.append("## 🛡️ Admin")
@@ -157,6 +165,10 @@ def cmd_liste(cfg):
     print("\nProfs (sehen alles außer Noten — Noten sind nie online):")
     for p in cfg.get("profs", []):
         print(f"  {p.get('name','?'):18s} Passwort: {p['passwort']}")
+    if cfg.get("nutzer"):
+        print("\nLese-Zugaenge (sehen die Skripte ALLER Kurse, nichts Internes):")
+        for n in cfg["nutzer"]:
+            print(f"  {n.get('name','?'):18s} Passwort: {n['passwort']}")
     a = cfg.get("admin", {})
     print(f"\nAdmin:\n  {a.get('name','?'):18s} Passwort: {a['passwort']}")
 
@@ -244,7 +256,13 @@ def cmd_passwort(cfg, wer):
                     neu, label = p["passwort"], f"Prof {p['name']}"
                     break
             else:
-                sys.exit(f"'{wer}' nicht gefunden — python3 verwaltung.py liste zeigt alle Zugänge.")
+                for n in cfg.get("nutzer", []):
+                    if n.get("name", "").lower() == wer_norm:
+                        n["passwort"] = neues_passwort(4)
+                        neu, label = n["passwort"], f"Lese-Zugang {n['name']}"
+                        break
+                else:
+                    sys.exit(f"'{wer}' nicht gefunden — python3 verwaltung.py liste zeigt alle Zugänge.")
     speichere(cfg)
     baue(cfg)
     abschluss(f"✅ Neues Passwort für {label}: {neu}",
