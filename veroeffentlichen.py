@@ -235,7 +235,10 @@ def main():
         fp_neu, fp_grund = archiv_stand(dashboard, jahr)
         archiv_offen = fp_neu is not None and fp_neu != gespeichert.get("archiv")
         if fp_neu is None and (dashboard / "suche_index.py").is_file():
+            # Nicht prüfbar zählt als OFFEN: der Wächter versucht dann zu veröffentlichen, der
+            # Lauf bricht mit klarer Meldung ab, und Tom bekommt eine Mitteilung — statt Stille.
             print(f"WARNUNG Archiv/CdM-Suche nicht prüfbar: {fp_grund}", file=sys.stderr)
+            archiv_offen = True
         # Neue oder geänderte LaTeX-Skripte, die der Sync noch nicht geholt hat (Trockenlauf, ändert nichts)
         sync_offen = False
         sync_skript = dashboard / "sync_inhalte.py"
