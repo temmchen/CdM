@@ -18,7 +18,7 @@ OneDrive-Dashboard-Ordner. Prüft alles und erledigt dann alles:
      Modul-Ordner, Dateien in Unterordnern oder direkt im Modulordner
   4. zeigt, was sich seit der letzten Veröffentlichung geändert hat
   5. baut, committet, pusht — nur wenn es wirklich etwas zu tun gibt
-  6. erneuert bei Noten-Änderungen das OFFLINE-Noten-Dashboard (nie online)
+  6. (CdM: kein Notendashboard — ein alter Noten-Ordner wird nur gemeldet, nie hochgeladen)
 
 Ohne Änderungen passiert nichts.
 """

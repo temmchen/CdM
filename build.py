@@ -54,8 +54,8 @@ BUILD_STATE = HIER / ".build-state.json"   # GEHEIM (gitignored): Vault-Schlüss
 PBKDF2_ITER = 600_000
 
 # Bereiche wie im bisherigen Schuljahr-Dashboard (Ordnernamen identisch).
-# BEWUSST OHNE "Noten": Notenlisten sind personenbezogene Daten und dürfen
-# NICHT online — sie bleiben lokal (Noten-Dashboard offline, siehe README).
+# OHNE "Noten": beim CdM gibt es keinen Noten-Bereich (Bewertung über die Plattform);
+# ein trotzdem vorhandener Ordner Noten/ wird nie hochgeladen (Sicherheitsnetz).
 KATEGORIEN = [
     ("skripte",    "Skripte"),
     ("pruefungen", "Pruefungen"),
@@ -143,7 +143,7 @@ def modul_schluessel(fach: dict) -> list:
 # aber nur als OneDrive-Weblinks (SharePoint, Anmeldung im 365-Konto), nie als
 # Inhalt. Das Paket wird gzip-komprimiert und ausschließlich unter dem Admin-KEK
 # verschlüsselt (vaults/archiv.enc); Profs, Kurse, Leser und Fremde können es
-# kryptographisch nicht öffnen. Noten tauchen darin nicht auf.
+# kryptographisch nicht öffnen. Bewertungsdateien (Grilles, Ergebnisse) tauchen darin nicht auf.
 ARCHIV_BEREICHE = [("skripte", "Skripte"), ("pruefungen", "Pruefungen"), ("examen", "Examen"),
                    ("repechage", "Repechage"), ("aufgaben", "Aufgaben"), ("sonstiges", "Sonstiges")]
 
@@ -196,7 +196,10 @@ def archiv_daten(dashboard: Path, aktiv: str):
                 for key, ordner in ARCHIV_BEREICHE:
                     d = md / ordner
                     if d.is_dir():
-                        bereiche[key] = [datei(f) for f in sammle_dateien(d)]
+                        # Bewertungsdateien (Grilles, Ergebnislisten) bleiben auch als Link offline —
+                        # dieselbe Einstufung wie in der CdM-Suche (art_aus → „Bewertung").
+                        bereiche[key] = [datei(f) for f in sammle_dateien(d)
+                                         if si.art_aus(f.name, str(f.relative_to(dashboard)), f.suffix.lstrip(".")) != "Bewertung"]
                 if bereiche:
                     module[md.name] = bereiche
             if module:

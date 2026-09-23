@@ -28,7 +28,7 @@ from pathlib import Path
 HIER = Path(__file__).resolve().parent
 KONFIG = HIER / "zugangsdaten.json"
 
-BEREICHS_ORDNER = ["Referentiels", "Skripte", "Pruefungen", "Aufgaben", "Noten", "Sonstiges"]
+BEREICHS_ORDNER = ["Skripte", "Pruefungen", "Examen", "Repechage", "Aufgaben", "Sonstiges"]   # CdM: keine Noten, keine Référentiels
 AKZENTE = ["eltec", "mint", "prodi"]
 
 ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"   # ohne 0/O, 1/l/i — tippfreundlich
@@ -106,7 +106,7 @@ def schreibe_passwort_readme(cfg):
         zeitraum = "3 Trimester" if kl.get("zeitraum") == "trimester" else "2 Semester"
         z.append(f"| **{kl['name']}** | `{kl['passwort']}` | {zeitraum} |")
     z.append("")
-    z.append("## 🧑‍🏫 Profs (sehen alles, aller Klassen — Noten sind nie online)")
+    z.append("## 🧑‍🏫 Profs (sehen alles, aller Klassen — Examen, Repêchage und Organisation bleiben offline)")
     z.append("")
     z.append("| Name | Passwort |")
     z.append("|---|---|")
@@ -162,7 +162,7 @@ def cmd_liste(cfg):
     for kl in cfg.get("klassen", []):
         faecher = ", ".join(f["name"] for f in kl.get("faecher", []))
         print(f"  {kl['key']:10s} Passwort: {kl['passwort']:22s} Fächer: {faecher}")
-    print("\nProfs (sehen alles außer Noten — Noten sind nie online):")
+    print("\nProfs (sehen Skripte, Prüfungen, Aufgaben, Sonstiges aller Klassen):")
     for p in cfg.get("profs", []):
         print(f"  {p.get('name','?'):18s} Passwort: {p['passwort']}")
     if cfg.get("nutzer"):
@@ -222,7 +222,7 @@ def cmd_klasse(cfg, key):
     baue(cfg)
     abschluss(f"✅ Klasse {key} angelegt — Ordner unter {inhalt / key}",
               f"   Passwort für die Klasse: {passwort}",
-              "   (Skripte in die Skripte-Ordner legen; Noten-Ordner bleibt immer offline.)")
+              "   (Skripte in die Skripte-Ordner legen; Examen und Repechage bleiben immer offline.)")
 
 
 def cmd_prof(cfg, name):
@@ -235,7 +235,7 @@ def cmd_prof(cfg, name):
     baue(cfg)
     abschluss(f"✅ Prof '{name}' angelegt — Passwort: {passwort}",
               "   Sieht nach dem Push alle Klassen (Skripte, Prüfungen, Aufgaben, "
-              "Sonstiges, Référentiels — keine Noten, die sind nie online).")
+              "Sonstiges; Examen und Repechage bleiben offline).")
 
 
 def cmd_passwort(cfg, wer):
