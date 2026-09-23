@@ -25,6 +25,7 @@ Krypto-Design (muss zu docs/index.html passen!):
 import argparse
 import base64
 import gzip
+import hashlib
 import json
 import re
 import secrets
@@ -147,25 +148,33 @@ ARCHIV_BEREICHE = [("skripte", "Skripte"), ("pruefungen", "Pruefungen"), ("exame
                    ("repechage", "Repechage"), ("aufgaben", "Aufgaben"), ("sonstiges", "Sonstiges")]
 
 
-def baue_archiv(dashboard: Path, aktiv: str):
-    """→ (gzip-Bytes, Meta) oder (None, Grund)."""
+def archiv_daten(dashboard: Path, aktiv: str):
+    """Rohdaten des Admin-Archivs als dict — oder None, wenn suche_index.py fehlt.
+    Baut dabei den Suchindex frisch (nur Dateinamen/Pfade, unter einer Sekunde)."""
     si_pfad = dashboard / "suche_index.py"
     if not si_pfad.is_file():
-        return None, "suche_index.py fehlt im Dashboard-Ordner"
+        return None
     import importlib.util
     spec = importlib.util.spec_from_file_location("suche_index", si_pfad)
     si = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(si)
     cfg = si.lade_konfig()
-    si.indexiere(cfg)                       # frisch (nur Namen/Pfade, dauert unter einer Sekunde)
+    lauf = si.indexiere(cfg)                # frisch (nur Namen/Pfade, unter einer Sekunde; wartet auf laufende Neubauten)
     web = lambda pf: si.web_link(str(pf), cfg)
+    # Fehlt eine OneDrive-Wurzel (umbenannt, nicht synchronisiert), wäre das Archiv unvollständig —
+    # dann lieber abbrechen als ein leeres Archiv veröffentlichen. Nur lokale Wurzeln (ohne Weblink,
+    # z. B. Latex/CdM auf dem zweiten Mac) dürfen fehlen.
+    fehlend_web = [f for f in lauf.get("fehlende", []) if si.web_link(f, cfg)]
+    if fehlend_web:
+        raise RuntimeError("Suchwurzel nicht erreichbar: " + ", ".join(fehlend_web))
 
     def datei(f: Path) -> dict:
         try:
-            g = f.stat().st_size
+            st = f.stat()
+            g, d = st.st_size, date.fromtimestamp(st.st_mtime).isoformat()
         except OSError:
-            g = 0
-        return {"n": anzeige_name(f), "w": web(f), "t": f.suffix.lstrip(".").lower(), "g": g}
+            g, d = 0, ""
+        return {"n": anzeige_name(f), "w": web(f), "t": f.suffix.lstrip(".").lower(), "g": g, "d": d}
 
     vz_cfg = {}
     vz = dashboard / "verzeichnisse.json"
@@ -205,16 +214,48 @@ def baue_archiv(dashboard: Path, aktiv: str):
                 continue
             pfad = str(e["pfad"]).replace("{jahr_}", jd.name.replace("-", "_")).replace("{jahr}", jd.name)
             w = web(pfad)
+            # bewusst ohne „Ordner existiert?": das hängt vom Mac ab und würde den Fingerabdruck
+            # zwischen zwei Rechnern verschieden machen
             eintrag["verzeichnisse"].append({"n": str(e.get("name", "")).replace("{jahr}", jd.name), "w": w,
-                                            "h": str(e.get("hinweis", "")), "lokal": w is None,
-                                            "da": Path(pfad).is_dir()})
+                                            "h": str(e.get("hinweis", "")), "lokal": w is None})
         jahre[jd.name] = eintrag
 
     dateien = si.export_portal(cfg)
-    daten = {"v": 1, "stand": date.today().isoformat(), "aktiv": aktiv, "onedrive": cfg.get("od_web", ""),
-             "jahre": jahre, "dateien": dateien}
+    return {"v": 1, "stand": date.today().isoformat(), "aktiv": aktiv, "onedrive": cfg.get("od_web", ""),
+            "jahre": jahre, "dateien": dateien}
+
+
+def _fingerprint(daten: dict) -> str:
+    """Kurzer Hash über den Archivinhalt OHNE Datum — gleich auf jedem Mac, solange die
+    OneDrive-Ordner gleich sind."""
+    d = dict(daten)
+    d.pop("stand", None)
+    roh = json.dumps(d, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(roh).hexdigest()[:16]
+
+
+def baue_archiv(dashboard: Path, aktiv: str):
+    """→ (gzip-Bytes, Meta) oder (None, Grund). Meta enthält „fp", den Fingerabdruck des
+    tatsächlich gebauten Archivs — veroeffentlichen.py merkt sich genau diesen Wert."""
+    daten = archiv_daten(dashboard, aktiv)
+    if daten is None:
+        return None, "suche_index.py fehlt im Dashboard-Ordner"
     roh = json.dumps(daten, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    return gzip.compress(roh, 9), {"jahre": sorted(jahre), "dateien": len(dateien), "stand": daten["stand"]}
+    return gzip.compress(roh, 9), {"jahre": sorted(daten["jahre"]), "dateien": len(daten["dateien"]),
+                                   "stand": daten["stand"], "fp": _fingerprint(daten)}
+
+
+def archiv_fingerprint(dashboard: Path, aktiv: str):
+    """→ (Fingerabdruck, "") des Archivs, wie es jetzt gebaut würde — oder (None, Grund),
+    wenn es nicht baubar ist (suche_index.py fehlt, Wurzel nicht erreichbar, Index gesperrt).
+    veroeffentlichen.py vergleicht den Wert mit dem zuletzt veröffentlichten."""
+    try:
+        daten = archiv_daten(dashboard, aktiv)
+    except Exception as ex:
+        return None, str(ex)
+    if daten is None:
+        return None, "suche_index.py fehlt im Dashboard-Ordner"
+    return _fingerprint(daten), ""
 
 
 # ─────────────────────────── Beispiel-PDFs ──────────────────────────────────
@@ -371,6 +412,19 @@ def main():
     for n in nutzer:
         registriere(n["passwort"], "nutzer", None, n.get("name", "Nutzer"))
     registriere(admin["passwort"], "admin", None, admin.get("name", "Admin"))
+
+    # ── Admin-Archiv VOR dem Schreiben der Tresore bauen ──
+    # Scheitert es, obwohl die CdM-Suche eingerichtet ist, wird hier ABGEBROCHEN — bevor
+    # irgendetwas in docs/vaults geschrieben wurde. Sonst verschwände das Archiv still aus
+    # dem Portal (oder docs/vaults bliebe halb erneuert liegen).
+    try:
+        archiv_gz, archiv_meta = baue_archiv(dashboard, jahr)
+    except Exception as ex:
+        archiv_gz, archiv_meta = None, f"Fehler: {ex}"
+    if not archiv_gz and (dashboard / "suche_index.py").is_file():
+        sys.exit(f"❌ Admin-Archiv konnte nicht gebaut werden ({archiv_meta}).\n"
+                 f"   Abbruch, bevor etwas geschrieben wurde. Mögliche Ursachen: OneDrive-Ordner nicht erreichbar, "
+                 f"Suchindex gerade durch 🔄 im Dashboard gesperrt. Ursache beheben und erneut veröffentlichen.")
 
     # ── Beispiel-Inhalte (optional) ──
     if args.beispiele:
@@ -576,19 +630,16 @@ def main():
     }
     index["zugaenge"] = wickle_ein(admin_pr["kek"], zugaenge)
 
-    # ── Admin-Archiv: alle Jahrgänge + CdM-Suche als OneDrive-Links (nur Admin-KEK) ──
-    try:
-        archiv_gz, archiv_meta = baue_archiv(dashboard, jahr)
-    except Exception as ex:
-        archiv_gz, archiv_meta = None, f"Fehler: {ex}"
+    # ── Admin-Archiv (oben gebaut) verschlüsseln: nur unter dem Admin-KEK ──
     if archiv_gz:
         (VAULTS / "archiv.enc").write_bytes(verschluessele(admin_pr["kek"], archiv_gz))
         index["archiv"] = {"datei": "vaults/archiv.enc", "gz": True, **archiv_meta}
         print(f"Archiv (nur Admin): {len(archiv_meta['jahre'])} Jahrgänge ({', '.join(archiv_meta['jahre'])}), "
-              f"{archiv_meta['dateien']} Dateien mit OneDrive-Link, {len(archiv_gz) // 1024} KB verschlüsselt.")
+              f"{archiv_meta['dateien']} Dateien mit OneDrive-Link, {len(archiv_gz) // 1024} KB verschlüsselt "
+              f"(Fingerabdruck {archiv_meta['fp']}).")
     else:
         (VAULTS / "archiv.enc").unlink(missing_ok=True)
-        print(f"⚠️  Admin-Archiv nicht gebaut: {archiv_meta}")
+        print("ℹ️  Kein suche_index.py im Dashboard-Ordner — Portal ohne Admin-Archiv gebaut.")
 
     BUILD_STATE.write_text(json.dumps(neu_state, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"\nVerschlüsselt: {zaehler['neu']} Datei(en) neu, "

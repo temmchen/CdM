@@ -12,6 +12,8 @@ OneDrive-Dashboard-Ordner. Prüft alles und erledigt dann alles:
      übernommen sein, sonst wird NICHT gebaut (sie gingen sonst verloren)
   2. erkennt NEUE Klassen-Ordner in OneDrive → fragt, ob die Klasse
      angelegt werden soll (Fächer werden aus den Modul-Ordnern abgeleitet)
+  2c. prüft das Admin-Archiv (Jahrgangs-Links + CdM-Suchindex): ändert sich in den
+      CdM-Ordnern etwas, wird auch ohne Änderung in den Online-Bereichen neu gebaut
   3. warnt bei Stolperfallen: Ordnernamen mit Leerzeichen, unbekannte
      Modul-Ordner, Dateien in Unterordnern oder direkt im Modulordner
   4. zeigt, was sich seit der letzten Veröffentlichung geändert hat
@@ -37,6 +39,20 @@ AKZENTE = ["eltec", "mint", "prodi"]
 
 sys.path.insert(0, str(HIER))
 import verwaltung                              # neues_passwort(), speichere()
+try:
+    from build import archiv_fingerprint       # Hash über Archiv + CdM-Suchindex (nur Admin)
+except (Exception, SystemExit):                # build.py fehlt/kaputt/ohne cryptography → Prüfung entfällt
+    archiv_fingerprint = None
+
+
+def archiv_stand(dashboard, jahr):
+    """→ (Fingerabdruck, "") des Admin-Archivs (Jahrgangs-Links + CdM-Suchindex) oder (None, Grund)."""
+    if archiv_fingerprint is None:
+        return None, "build.py nicht ladbar (Paket cryptography?)"
+    try:
+        return archiv_fingerprint(dashboard, jahr)
+    except Exception as ex:
+        return None, str(ex)
 
 
 # ───────────────────────── Schuljahr ────────────────────────────────────────
@@ -207,17 +223,31 @@ def main():
     # --pruefen: NUR nachsehen, nichts verändern (für den Portal-Wächter).
     # Bewusst vor Pull/Sync/Einsammeln — dieser Modus fasst nichts an.
     if "--pruefen" in sys.argv:
-        alt = {}
+        gespeichert = {}
         if STAND.exists():
             try:
-                alt = json.loads(STAND.read_text(encoding="utf-8")).get("online", {})
+                gespeichert = json.loads(STAND.read_text(encoding="utf-8"))
             except Exception:
-                alt = {}
+                gespeichert = {}
+        alt = gespeichert.get("online", {})
         jetzt_online, _n, _w = inventar(cfg, inhalt)
+        # Archiv/CdM-Suche: neue Dateien in den CdM-Ordnern zählen ebenfalls als „offen"
+        fp_neu, fp_grund = archiv_stand(dashboard, jahr)
+        archiv_offen = fp_neu is not None and fp_neu != gespeichert.get("archiv")
+        if fp_neu is None and (dashboard / "suche_index.py").is_file():
+            print(f"WARNUNG Archiv/CdM-Suche nicht prüfbar: {fp_grund}", file=sys.stderr)
+        # Neue oder geänderte LaTeX-Skripte, die der Sync noch nicht geholt hat (Trockenlauf, ändert nichts)
+        sync_offen = False
+        sync_skript = dashboard / "sync_inhalte.py"
+        if sync_skript.exists():
+            r = subprocess.run([sys.executable, str(sync_skript), "--trocken"], cwd=str(dashboard),
+                               capture_output=True, text=True)
+            m = re.search(r"Neu/aktualisiert:\s*(\d+)", r.stdout or "")
+            sync_offen = bool(m and int(m.group(1)) > 0)
         git("fetch", "--quiet", "origin", "main", fehler_ok=True)
         voraus = git("rev-list", "--count", "HEAD..origin/main",
                      fehler_ok=True).stdout.strip() or "0"
-        if jetzt_online == alt and voraus == "0":
+        if jetzt_online == alt and voraus == "0" and not archiv_offen and not sync_offen:
             print("NICHTS-ZU-TUN")
         else:
             print("OFFEN")
@@ -322,10 +352,12 @@ def main():
             sag(f"   → übersprungen (Ordner wird ignoriert, bis die Klasse angelegt ist)")
 
     # 2b) Unterlagen aus den Quellordnern holen (quellen.json im Dashboard-Ordner)
-    sync_skript = inhalt / "sync_inhalte.py"
-    if sync_skript.exists():
-        sag("② Hole Unterlagen aus den Quellordnern …")
-        r = subprocess.run([sys.executable, str(sync_skript)], cwd=str(inhalt),
+    sync_skript = dashboard / "sync_inhalte.py"       # liegt im Dashboard-Ordner, nicht im Jahr
+    if not sync_skript.exists():
+        sag(f"⚠️  {sync_skript.name} fehlt im Dashboard-Ordner — neue LaTeX-Skripte werden NICHT geholt.")
+    else:
+        sag("② Hole Unterlagen aus den Quellordnern (LaTeX-Skripte) …")
+        r = subprocess.run([sys.executable, str(sync_skript)], cwd=str(dashboard),
                            capture_output=True, text=True)
         for zeile in (r.stdout or "").splitlines():
             if zeile.strip():
@@ -362,12 +394,27 @@ def main():
     for k in weg[:10]:
         sag(f"   − {k}")
     if not (neu or geaendert or weg):
-        sag("   (keine Datei-Änderungen)")
+        sag("   (keine Datei-Änderungen in den Online-Bereichen)")
+
+    # 4a) Admin-Archiv + CdM-Suche: hat sich in den CdM-Ordnern (New CdM, CdM, Dashboard-
+    #     Jahrgänge) irgendetwas geändert? Dann wird ebenfalls neu gebaut und veröffentlicht —
+    #     der Index im Portal bleibt so nie stehen.
+    archiv_alt = stand_alt.get("archiv")
+    archiv_neu, archiv_grund = archiv_stand(dashboard, jahr)
+    archiv_diff = archiv_neu is not None and archiv_neu != archiv_alt
+    if archiv_diff:
+        sag("   ~ Archiv/CdM-Suche: Dateien in den CdM-Ordnern haben sich geändert — Portal-Index wird erneuert")
+    elif archiv_neu is None:
+        if (dashboard / "suche_index.py").is_file():
+            sys.exit(f"❌ Archiv/CdM-Suche kann nicht geprüft werden: {archiv_grund}\n"
+                     f"   Es wurde nichts veröffentlicht — sonst bliebe die Portal-Suche unbemerkt veraltet. "
+                     f"Ursache beheben (OneDrive-Ordner erreichbar? 🔄 im Dashboard gerade aktiv?) und erneut versuchen.")
+        sag(f"   ℹ️  Archiv/CdM-Suche nicht eingerichtet ({archiv_grund})")
 
     # 4) Offline-Noten-Dashboard bei Bedarf erneuern (bleibt lokal!)
     noten_ok = True
     if noten_diff:
-        nd = inhalt / "baue_noten_dashboard.py"
+        nd = dashboard / "baue_noten_dashboard.py"
         if nd.is_file():
             sag("\n📊 Noten haben sich geändert — erneuere das OFFLINE-Noten-Dashboard …")
             r = subprocess.run([sys.executable, str(nd)], cwd=str(inhalt))
@@ -380,11 +427,14 @@ def main():
             sag(f"\n⚠️  {nd.name} nicht gefunden — Offline-Noten-Dashboard "
                 f"konnte nicht erneuert werden.")
 
+    archiv_veroeffentlicht = [archiv_neu if archiv_neu is not None else archiv_alt]   # wird nach dem Build ersetzt
+
     def speichere_stand():
         STAND.write_text(json.dumps({
             "online": online,
             "noten": noten if noten_ok else alt_noten,
             "browser_aktionen": browser_aktionen,
+            "archiv": archiv_veroeffentlicht[0],
         }), encoding="utf-8")
 
     # 5) Veröffentlichen — nur wenn nötig
@@ -393,8 +443,9 @@ def main():
     erzwingen = "--erzwingen" in sys.argv
     if erzwingen:
         sag("   (--erzwingen: baue und veröffentliche auch ohne Datei-Änderung)")
-    if not (neu or geaendert or weg or config_geaendert or erzwingen):
-        sag("\n✅ Alles aktuell — nichts zu veröffentlichen.")
+    if not (neu or geaendert or weg or config_geaendert or erzwingen or archiv_diff):
+        sag("\n✅ Alles aktuell — nichts zu veröffentlichen "
+            + ("(Online-Bereiche und Archiv/Suche unverändert)." if archiv_neu is not None else "(Online-Bereiche unverändert)."))
         speichere_stand()
         return
 
@@ -402,6 +453,13 @@ def main():
     r = subprocess.run([sys.executable, str(HIER / "build.py")])
     if r.returncode != 0:
         sys.exit("❌ build.py fehlgeschlagen — es wurde nichts veröffentlicht.")
+    # Gemerkt wird der Fingerabdruck des Archivs, das WIRKLICH gebaut wurde (index.json),
+    # nicht der vorab berechnete — so passt der Stand auch nach einer Änderung zwischendurch.
+    try:
+        gebaut = json.loads((HIER / "docs" / "vaults" / "index.json").read_text(encoding="utf-8"))
+        archiv_veroeffentlicht[0] = (gebaut.get("archiv") or {}).get("fp")
+    except Exception:
+        archiv_veroeffentlicht[0] = None       # unbekannt → nächster Lauf prüft und baut neu
 
     teile = []
     if config_geaendert:
@@ -412,6 +470,8 @@ def main():
         teile.append(f"{len(geaendert)} geändert")
     if weg:
         teile.append(f"{len(weg)} entfernt")
+    if archiv_diff:
+        teile.append("Archiv/CdM-Suche erneuert")
     nachricht = "Inhalte aktualisiert: " + ", ".join(teile)
 
     sag("⑥ Veröffentliche …")
