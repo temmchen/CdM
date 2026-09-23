@@ -34,6 +34,8 @@ KONFIG = HIER / "zugangsdaten.json"
 STAND = HIER / ".letzter-stand.json"          # lokales Gedächtnis (gitignored)
 
 BEREICHE_ONLINE = ["Skripte", "Pruefungen", "Aufgaben", "Sonstiges", "Referentiels"]
+# CdM: kein Bereich „Noten" — die Chambre des Métiers bewertet über ihre Plattform. Ein alter
+# Noten-Ordner würde weiterhin erkannt und NIE hochgeladen, aber es gibt kein Notendashboard.
 ALLE_BEREICHE = BEREICHE_ONLINE + ["Noten"]
 AKZENTE = ["eltec", "mint", "prodi"]
 
@@ -414,21 +416,11 @@ def main():
                      f"Ursache beheben (OneDrive-Ordner erreichbar? 🔄 im Dashboard gerade aktiv?) und erneut versuchen.")
         sag(f"   ℹ️  Archiv/CdM-Suche nicht eingerichtet ({archiv_grund})")
 
-    # 4) Offline-Noten-Dashboard bei Bedarf erneuern (bleibt lokal!)
+    # 4) Kein Notendashboard für den CdM: die Chambre des Métiers bewertet über ihre
+    #    Plattform. Ein Noten-Ordner wird nur zur Kenntnis genommen und nie hochgeladen.
     noten_ok = True
-    if noten_diff:
-        nd = dashboard / "baue_noten_dashboard.py"
-        if nd.is_file():
-            sag("\n📊 Noten haben sich geändert — erneuere das OFFLINE-Noten-Dashboard …")
-            r = subprocess.run([sys.executable, str(nd)], cwd=str(inhalt))
-            noten_ok = (r.returncode == 0)
-            if not noten_ok:
-                sag("   ⚠️  Noten-Dashboard-Neubau fehlgeschlagen — wird beim "
-                    "nächsten Lauf erneut versucht.")
-        else:
-            noten_ok = False
-            sag(f"\n⚠️  {nd.name} nicht gefunden — Offline-Noten-Dashboard "
-                f"konnte nicht erneuert werden.")
+    if noten_diff and noten:
+        sag(f"\nℹ️  {len(noten)} Datei(en) in Noten-Ordnern — bleiben offline (kein Notendashboard beim CdM).")
 
     archiv_veroeffentlicht = [archiv_neu if archiv_neu is not None else archiv_alt]   # wird nach dem Build ersetzt
 
@@ -498,7 +490,7 @@ def main():
 
     speichere_stand()
     sag("\n✅ Fertig! In 1–2 Minuten online: https://temmchen.github.io/CdM/")
-    sag("   (Noten wurden wie immer NICHT hochgeladen.)")
+    sag("   (Examen, Repêchage und Organisation bleiben wie immer offline.)")
 
 
 if __name__ == "__main__":
