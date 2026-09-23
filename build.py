@@ -206,9 +206,13 @@ def archiv_daten(dashboard: Path, aktiv: str):
                 eintrag["klassen"][kl.name] = module
         od = jd / "Organisation"
         if od.is_dir():
-            eintrag["organisation"] = [datei(f) for f in sammle_dateien(od)]
+            def keine_bewertung(f: Path) -> bool:
+                return si.art_aus(f.name, str(f.relative_to(dashboard)), f.suffix.lstrip(".")) != "Bewertung"
+            eintrag["organisation"] = [datei(f) for f in sammle_dateien(od) if keine_bewertung(f)]
             for u in sorted(p for p in od.iterdir() if p.is_dir() and not p.name.startswith(".")):
                 for f in sammle_dateien(u):
+                    if not keine_bewertung(f):
+                        continue
                     e = datei(f); e["n"] = f"{u.name} / {e['n']}"
                     eintrag["organisation"].append(e)
         alle = list(vz_cfg.get("jahre", {}).get(jd.name, [])) + list(vz_cfg.get("jahre", {}).get("*", []))
