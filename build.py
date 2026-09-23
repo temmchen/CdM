@@ -24,7 +24,9 @@ Krypto-Design (muss zu docs/index.html passen!):
 
 import argparse
 import base64
+import gzip
 import json
+import re
 import secrets
 import shutil
 import subprocess
@@ -133,6 +135,86 @@ def modul_schluessel(fach: dict) -> list:
     for sem, name in sorted(fach.get("modul", {}).items()):
         out.append((sem, name, name.replace(" ", "")))
     return out
+
+
+# ─────────────────────────── Admin-Archiv (nur Links) ───────────────────────
+# Der Admin sieht im Portal ALLE Jahrgänge und eine Suche über alle CdM-Dateien —
+# aber nur als OneDrive-Weblinks (SharePoint, Anmeldung im 365-Konto), nie als
+# Inhalt. Das Paket wird gzip-komprimiert und ausschließlich unter dem Admin-KEK
+# verschlüsselt (vaults/archiv.enc); Profs, Kurse, Leser und Fremde können es
+# kryptographisch nicht öffnen. Noten tauchen darin nicht auf.
+ARCHIV_BEREICHE = [("skripte", "Skripte"), ("pruefungen", "Pruefungen"), ("examen", "Examen"),
+                   ("repechage", "Repechage"), ("aufgaben", "Aufgaben"), ("sonstiges", "Sonstiges")]
+
+
+def baue_archiv(dashboard: Path, aktiv: str):
+    """→ (gzip-Bytes, Meta) oder (None, Grund)."""
+    si_pfad = dashboard / "suche_index.py"
+    if not si_pfad.is_file():
+        return None, "suche_index.py fehlt im Dashboard-Ordner"
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("suche_index", si_pfad)
+    si = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(si)
+    cfg = si.lade_konfig()
+    si.indexiere(cfg)                       # frisch (nur Namen/Pfade, dauert unter einer Sekunde)
+    web = lambda pf: si.web_link(str(pf), cfg)
+
+    def datei(f: Path) -> dict:
+        try:
+            g = f.stat().st_size
+        except OSError:
+            g = 0
+        return {"n": anzeige_name(f), "w": web(f), "t": f.suffix.lstrip(".").lower(), "g": g}
+
+    vz_cfg = {}
+    vz = dashboard / "verzeichnisse.json"
+    if vz.is_file():
+        try:
+            vz_cfg = json.loads(vz.read_text(encoding="utf-8"))
+        except Exception:
+            vz_cfg = {}
+
+    jahre = {}
+    for jd in sorted(p for p in dashboard.iterdir() if p.is_dir() and re.match(r"^\d{4}-\d{4}$", p.name)):
+        if not any(f.is_file() and not f.name.startswith(".") for f in jd.rglob("*")):
+            continue
+        eintrag = {"klassen": {}, "organisation": [], "verzeichnisse": []}
+        for kl in sorted(p for p in jd.iterdir() if p.is_dir() and not p.name.startswith(".") and p.name != "Organisation"):
+            module = {}
+            for md in sorted(p for p in kl.iterdir() if p.is_dir() and not p.name.startswith(".")):
+                bereiche = {}
+                for key, ordner in ARCHIV_BEREICHE:
+                    d = md / ordner
+                    if d.is_dir():
+                        bereiche[key] = [datei(f) for f in sammle_dateien(d)]
+                if bereiche:
+                    module[md.name] = bereiche
+            if module:
+                eintrag["klassen"][kl.name] = module
+        od = jd / "Organisation"
+        if od.is_dir():
+            eintrag["organisation"] = [datei(f) for f in sammle_dateien(od)]
+            for u in sorted(p for p in od.iterdir() if p.is_dir() and not p.name.startswith(".")):
+                for f in sammle_dateien(u):
+                    e = datei(f); e["n"] = f"{u.name} / {e['n']}"
+                    eintrag["organisation"].append(e)
+        alle = list(vz_cfg.get("jahre", {}).get(jd.name, [])) + list(vz_cfg.get("jahre", {}).get("*", []))
+        for e in alle:
+            if not isinstance(e, dict) or not e.get("pfad"):
+                continue
+            pfad = str(e["pfad"]).replace("{jahr_}", jd.name.replace("-", "_")).replace("{jahr}", jd.name)
+            w = web(pfad)
+            eintrag["verzeichnisse"].append({"n": str(e.get("name", "")).replace("{jahr}", jd.name), "w": w,
+                                            "h": str(e.get("hinweis", "")), "lokal": w is None,
+                                            "da": Path(pfad).is_dir()})
+        jahre[jd.name] = eintrag
+
+    dateien = si.export_portal(cfg)
+    daten = {"v": 1, "stand": date.today().isoformat(), "aktiv": aktiv, "onedrive": cfg.get("od_web", ""),
+             "jahre": jahre, "dateien": dateien}
+    roh = json.dumps(daten, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return gzip.compress(roh, 9), {"jahre": sorted(jahre), "dateien": len(dateien), "stand": daten["stand"]}
 
 
 # ─────────────────────────── Beispiel-PDFs ──────────────────────────────────
@@ -493,6 +575,20 @@ def main():
         "stand": date.today().isoformat(),
     }
     index["zugaenge"] = wickle_ein(admin_pr["kek"], zugaenge)
+
+    # ── Admin-Archiv: alle Jahrgänge + CdM-Suche als OneDrive-Links (nur Admin-KEK) ──
+    try:
+        archiv_gz, archiv_meta = baue_archiv(dashboard, jahr)
+    except Exception as ex:
+        archiv_gz, archiv_meta = None, f"Fehler: {ex}"
+    if archiv_gz:
+        (VAULTS / "archiv.enc").write_bytes(verschluessele(admin_pr["kek"], archiv_gz))
+        index["archiv"] = {"datei": "vaults/archiv.enc", "gz": True, **archiv_meta}
+        print(f"Archiv (nur Admin): {len(archiv_meta['jahre'])} Jahrgänge ({', '.join(archiv_meta['jahre'])}), "
+              f"{archiv_meta['dateien']} Dateien mit OneDrive-Link, {len(archiv_gz) // 1024} KB verschlüsselt.")
+    else:
+        (VAULTS / "archiv.enc").unlink(missing_ok=True)
+        print(f"⚠️  Admin-Archiv nicht gebaut: {archiv_meta}")
 
     BUILD_STATE.write_text(json.dumps(neu_state, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"\nVerschlüsselt: {zaehler['neu']} Datei(en) neu, "

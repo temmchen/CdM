@@ -241,6 +241,26 @@
   footer b{color:var(--tx2)}
 
 
+  /* ---------- 🗄️ Archiv & CdM-Suche (nur Admin) ---------- */
+  .archiv-kopf{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 16px}
+  .archiv-kopf .hinweis{color:var(--tx3);font-size:12.5px}
+  .archiv-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px;align-items:start;margin-bottom:18px}
+  .archiv-grid .cat h4{margin:10px 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3)}
+  .such-feld{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+  .such-feld input[type=search]{flex:1 1 260px;padding:10px 13px;border-radius:11px;border:1px solid var(--line2);background:var(--card2);color:var(--tx);font:inherit;font-size:14px}
+  .such-feld input[type=search]:focus{outline:none;border-color:var(--accent)}
+  .such-feld select{padding:8px 10px;border-radius:10px;border:1px solid var(--line2);background:var(--card2);color:var(--tx);font:inherit;font-size:13px}
+  .such-status{font-size:12px;color:var(--tx3);margin:0 0 8px}
+  .such-zeile{display:grid;grid-template-columns:44px 1fr auto;gap:10px;align-items:center;padding:8px 10px;border-radius:11px;border:1px solid var(--line);background:var(--card2)}
+  .such-zeile+.such-zeile{margin-top:5px}
+  .such-typ{font-size:10.5px;font-weight:800;letter-spacing:.04em;text-align:center;padding:5px 0;border-radius:8px;background:var(--card);color:var(--tx2);border:1px solid var(--line)}
+  .such-name{font-weight:650;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .such-pfad{font-size:11.5px;color:var(--tx3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}
+  .such-chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:4px}
+  .such-chips .chip{font-size:11px;padding:2px 8px}
+  .such-leer{padding:16px;color:var(--tx3);text-align:center}
+  mark.hit{background:color-mix(in srgb,var(--accent) 35%,transparent);color:inherit;border-radius:3px;padding:0 1px}
+  .lokal-tag{font-size:11px;color:var(--tx3);margin-left:6px}
   /* ---------- 🔑 Zugänge der Kurse (nur Admin) ---------- */
   .zg-karte .zg-alle{margin-left:auto}
   .zg-zeile{display:flex;align-items:center;gap:12px;padding:10px 12px;
@@ -314,6 +334,7 @@
     </div>
     <span class="rolle-chip nur-angemeldet" id="rolleChip"><span class="dot"></span><span id="rolleText"></span></span>
     <span class="spacer"></span>
+    <select class="klass-select" id="archivSelect" title="Jahrgang ansehen (nur Admin) — ältere Jahrgänge als OneDrive-Links" aria-label="Jahrgang" hidden></select>
     <select class="klass-select nur-angemeldet" id="klassenSelect" title="Klasse wählen" aria-label="Klasse wählen"></select>
     <div class="seg nur-angemeldet" id="seg">
       <button data-sem="1" class="on">Semester 1</button>
@@ -474,7 +495,9 @@ const SEM_KEY = "dash_sem", KLASSE_KEY = "dash_klasse", THEME_KEY = "dash_theme"
 let INDEX = null;         // vaults/index.json (öffentlich, ohne Geheimnisse)
 let SESSION = null;       // { rolle, label, vaults:[{id,k,manifest}] }
 let DATEN = null;         // { klassen:{ key:{ name, faecher, module, bereiche:Set } } }
-const state = { klasse:null, sem:loadSem(), view:"home", modul:null };
+let ARCHIV = null;        // nur Admin: { aktiv, jahre:{ "2025-2026":{klassen,organisation,verzeichnisse} }, dateien:[…] }
+let ARCHIV_STATUS = "";   // "" | "alt" (Portal ohne Archiv gebaut) | "browser" | "fehler"
+const state = { klasse:null, sem:loadSem(), view:"home", modul:null, archivJahr:null, sucheQ:"", sucheJahr:"", sucheArt:"", sucheModul:"" };
 const vaultKeyCache = new Map();   // vaultId → CryptoKey
 const blobCache = new Map();       // dateiId → BlobURL
 
@@ -661,8 +684,143 @@ async function starteOberflaeche(){
   $("#logo").textContent = (AK()?.key || "PT").replace(/[^A-Za-z0-9]/g,"").slice(0,2).toUpperCase();
   document.title = "Portal · " + (INDEX.schuljahr||"");
   await ladeZugaenge();   /* Admin: Zugangsliste öffnen, damit die Karte gefüllt ist */
+  await ladeArchiv();     /* Admin: Jahrgänge + CdM-Suche (OneDrive-Links) */
+  archivSelectFuellen();
   state.view="home"; state.modul=null;
   render();
+}
+
+/* ═══════════════════════════ Archiv & CdM-Suche (nur Admin) ═════════════════ */
+/* Das Paket vaults/archiv.enc enthält KEINE Inhalte, nur Dateinamen und
+   OneDrive-Weblinks. Es ist ausschließlich unter dem Admin-KEK verschlüsselt
+   (build.py) — Profs, Kurse, Leser und Fremde können es nicht öffnen. */
+async function ladeArchiv(){
+  ARCHIV = null; ARCHIV_STATUS = "";
+  if(!SESSION || SESSION.rolle !== "admin") return;
+  const a = INDEX && INDEX.archiv;
+  if(!a || !a.datei){ ARCHIV_STATUS = "alt"; return; }
+  try{
+    const r = await fetch(a.datei, {cache:"no-store"});
+    if(!r.ok) throw new Error("archiv");
+    let buf = await entschluesseleBlock(await adminKekKey(), await r.arrayBuffer());
+    if(a.gz){
+      if(!("DecompressionStream" in window)){ ARCHIV_STATUS = "browser"; return; }
+      buf = await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
+    }
+    ARCHIV = JSON.parse(new TextDecoder().decode(buf));
+  }catch(e){ ARCHIV_STATUS = "fehler"; }
+}
+function archivJahre(){ return ARCHIV ? Object.keys(ARCHIV.jahre||{}).sort().reverse() : []; }
+function archivSelectFuellen(){
+  const sel = $("#archivSelect"); if(!sel) return;
+  const jahre = archivJahre();
+  if(!SESSION || SESSION.rolle!=="admin" || !jahre.length){ sel.hidden = true; return; }
+  const aktiv = ARCHIV.aktiv;
+  if(!jahre.includes(aktiv)) jahre.unshift(aktiv);
+  sel.innerHTML = jahre.map(j=>`<option value="${esc(j)}">${esc(j.replace("-"," – "))}${j===aktiv?" ★ aktiv":" · Archiv"}</option>`).join("");
+  sel.value = state.archivJahr || aktiv;
+  sel.hidden = false;
+}
+function foldText(s){
+  return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase()
+    .replace(/ß/g,"ss").replace(/ae/g,"a").replace(/oe/g,"o").replace(/ue/g,"u");
+}
+function hebeHervor(text, q){
+  const t = esc(text); if(!q) return t;
+  const w = q.split(/\s+/).filter(x=>x.length>1).map(x=>x.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"));
+  if(!w.length) return t;
+  try{ return t.replace(new RegExp("("+w.join("|")+")","gi"), "<mark class=\"hit\">$1</mark>"); }catch(e){ return t; }
+}
+const TYP_KURZ = { pdf:"PDF", word:"DOCX", excel:"XLSX", powerpoint:"PPTX", text:"TXT", latex:"TEX" };
+function sucheTreffer(q, jahr, art, modul, max=150){
+  if(!ARCHIV) return {treffer:[], anzahl:0};
+  const terme = foldText(q).split(/\s+/).filter(Boolean);
+  let alle = ARCHIV.dateien || [];
+  if(jahr) alle = alle.filter(d=>d.j===jahr);
+  if(art) alle = alle.filter(d=>d.a===art);
+  if(modul) alle = alle.filter(d=>d.m===modul);
+  if(terme.length){
+    alle = alle.filter(d=>{ const h = foldText(d.n+" "+d.p+" "+(d.a||"")+" "+(d.m||"")+" "+(d.j||"")+" "+(d.r||"")); return terme.every(t=>h.includes(t)); });
+  }
+  return { treffer: alle.slice(0,max), anzahl: alle.length };
+}
+function sucheOptionen(feld, aktuell, alleText, jahr){
+  let basis = ARCHIV ? (ARCHIV.dateien||[]) : [];
+  if(jahr) basis = basis.filter(d=>d.j===jahr);
+  const z = new Map(); basis.forEach(d=>{ const k=d[feld]||""; if(k) z.set(k,(z.get(k)||0)+1); });
+  const werte=[...z.entries()].sort((a,b)=>b[1]-a[1]);
+  return `<option value="">${esc(alleText)}</option>`+werte.map(([w,n])=>`<option value="${esc(w)}" ${w===aktuell?"selected":""}>${esc(w)} · ${n}</option>`).join("");
+}
+function renderSucheKarte(jahrFest){
+  if(!SESSION || SESSION.rolle!=="admin") return "";
+  if(!ARCHIV){
+    const text = ARCHIV_STATUS==="alt" ? "Dieses Portal wurde noch ohne Archiv-Paket veröffentlicht — einmal am Mac neu veröffentlichen (build.py)."
+      : ARCHIV_STATUS==="browser" ? "Dieser Browser kann das Archiv-Paket nicht entpacken (DecompressionStream fehlt) — bitte aktuellen Safari/Chrome nutzen."
+      : ARCHIV_STATUS==="fehler" ? "Das Archiv ließ sich nicht entschlüsseln — bitte einmal ab- und neu anmelden." : "Archiv wird geladen …";
+    return `<section class="cat" style="--fach:var(--mint)"><h3><span class="ic">🔎</span> CdM-Suche <span class="hint-sub">nur in der Admin-Sicht</span></h3><div class="cat-empty">${esc(text)}</div></section>`;
+  }
+  const jahr = jahrFest || state.sucheJahr;
+  const n = (ARCHIV.dateien||[]).filter(d=>!jahr || d.j===jahr).length;
+  const jahrSel = jahrFest ? "" : `<select id="cdmSucheJahr" title="Jahrgang">${sucheOptionen("j", state.sucheJahr, "Alle Jahre")}</select>`;
+  return `<section class="cat" style="--fach:var(--mint)">
+    <h3><span class="ic">🔎</span> CdM-Suche <span class="hint-sub">Prüfungsfragen · Fragebögen · Kandidatenbögen · Skripte — öffnet in OneDrive</span><span class="cnt">${n}</span></h3>
+    <div class="such-feld">
+      <input type="search" id="cdmSucheFeld" placeholder="Suchen … z. B. Fragebogen Techno, Kandidat Isolation, Korrekturbericht" value="${esc(state.sucheQ)}" spellcheck="false" autocomplete="off">
+      ${jahrSel}
+      <select id="cdmSucheArt" title="Art">${sucheOptionen("a", state.sucheArt, "Alle Arten", jahr)}</select>
+      <select id="cdmSucheModul" title="Modul">${sucheOptionen("m", state.sucheModul, "Alle Module", jahr)}</select>
+    </div>
+    <div id="cdmSucheErgebnis" data-jahr="${esc(jahrFest||"")}">${sucheErgebnisHtml(jahrFest)}</div>
+    <div class="admin-hilfe">Der Index umfasst alle Dateien der CdM-Ordner in OneDrive (Namen und Pfade, kein Inhalt) und wird bei jedem
+      Veröffentlichen am Mac erneuert (Stand ${esc(ARCHIV.stand||"?")}). „Öffnen“ führt in dein OneDrive — dort einmal im 365-Konto angemeldet sein.</div>
+  </section>`;
+}
+function sucheErgebnisHtml(jahrFest){
+  const jahr = jahrFest || state.sucheJahr;
+  const {treffer, anzahl} = sucheTreffer(state.sucheQ, jahr, state.sucheArt, state.sucheModul);
+  if(!anzahl) return `<div class="such-leer">Nichts gefunden — weniger Wörter oder Filter zurücksetzen (Umlaute sind egal).</div>`;
+  const kopf = `<div class="such-status"><b>${anzahl.toLocaleString("de-DE")}</b> Treffer${treffer.length<anzahl?` · die ersten ${treffer.length}`:""}</div>`;
+  return kopf + treffer.map(d=>{
+    const ordner = d.p.includes("/") ? d.p.slice(0, d.p.lastIndexOf("/")) : "";
+    const chips = [d.j?`<span class="chip">${esc(d.j)}</span>`:"", d.m?`<span class="chip">${esc(d.m)}</span>`:"", d.a?`<span class="chip">${esc(d.a)}</span>`:""].join("");
+    return `<div class="such-zeile">
+      <div class="such-typ">${esc(TYP_KURZ[d.t]||String(d.t||"?").toUpperCase())}</div>
+      <div style="min-width:0"><div class="such-name" title="${esc(d.n)}">${hebeHervor(d.n, state.sucheQ)}</div>
+        <div class="such-pfad" title="${esc(d.r+" › "+d.p)}"><b>${esc(d.r||"")}</b> › ${hebeHervor(ordner, state.sucheQ)} · ${esc(d.d||"")}${d.g?" · "+groesseText(d.g):""}</div>
+        <div class="such-chips">${chips}</div></div>
+      <a class="open" href="${esc(d.w)}" target="_blank" rel="noopener">Öffnen ↗</a></div>`;
+  }).join("");
+}
+const ARCHIV_KATS = [ {key:"skripte",name:"Skripte",icon:"📘"}, {key:"pruefungen",name:"Prüfungen",icon:"📝"},
+  {key:"examen",name:"Examen",icon:"🎓"}, {key:"repechage",name:"Examen de repêchage",icon:"🔁"},
+  {key:"aufgaben",name:"Aufgaben",icon:"✏️"}, {key:"sonstiges",name:"Sonstiges",icon:"🗂️"} ];
+function archivLinkZeile(d){
+  const a = d.w ? `<a class="open" href="${esc(d.w)}" target="_blank" rel="noopener">Öffnen ↗</a>` : `<span class="open" title="nur auf dem Mac">—</span>`;
+  return `<li class="docrow ${d.w?'':'dead'}"><span class="di">${FILE_SVG}</span><span class="dn">${esc(d.n)}${d.g?` <span class="lokal-tag">${groesseText(d.g)}</span>`:""}</span>${a}</li>`;
+}
+function renderArchiv(){
+  const jahr = state.archivJahr, J = ARCHIV && ARCHIV.jahre && ARCHIV.jahre[jahr];
+  const kopf = `<div class="archiv-kopf"><h2 style="margin:0;font-size:18px">🗄️ Archiv ${esc(jahr.replace("-"," – "))}</h2>
+    <span class="hinweis">nur Admin · alle Dateien öffnen in OneDrive (SharePoint) · aktiv im Portal ist ${esc((ARCHIV.aktiv||"").replace("-"," – "))}</span></div>`;
+  if(!J){ $("#view").innerHTML = kopf + `<div class="empty-note">Für diesen Jahrgang liegt nichts im Dashboard-Ordner.</div>`; return; }
+  const karten = [];
+  for(const [kl, module] of Object.entries(J.klassen||{})){
+    for(const [mk, bereiche] of Object.entries(module||{})){
+      const teile = ARCHIV_KATS.filter(k=>bereiche[k.key]).map(k=>{
+        const l = bereiche[k.key]||[];
+        return `<h4>${k.icon} ${esc(k.name)} <span class="cnt">${l.length}</span></h4>` + (l.length ? `<ul class="doclist">${l.map(archivLinkZeile).join("")}</ul>` : `<div class="cat-empty">leer</div>`);
+      }).join("");
+      karten.push(`<section class="cat" style="--fach:var(--eltec)"><h3><span class="ic">📚</span> ${esc(kl)}${mk!==kl?` · ${esc(mk)}`:""}</h3>${teile}</section>`);
+    }
+  }
+  const org = J.organisation||[];
+  karten.push(`<section class="cat" style="--fach:var(--accent)"><h3><span class="ic">🏛️</span> Organisation <span class="cnt">${org.length}</span></h3>`
+    + (org.length ? `<ul class="doclist">${org.map(archivLinkZeile).join("")}</ul>` : `<div class="cat-empty">leer</div>`) + `</section>`);
+  const vz = J.verzeichnisse||[];
+  karten.push(`<section class="cat" style="--fach:var(--mint)"><h3><span class="ic">📂</span> Hauptverzeichnisse <span class="cnt">${vz.length}</span></h3>
+    <ul class="doclist">${vz.map(v=>`<li class="docrow ${v.w?'':'dead'}"><span class="di">📁</span><span class="dn">${esc(v.n)}${v.lokal?` <span class="lokal-tag">nur am Mac</span>`:""}${v.h?`<div class="such-pfad" style="white-space:normal">${esc(v.h)}</div>`:""}</span>${v.w?`<a class="open" href="${esc(v.w)}" target="_blank" rel="noopener">OneDrive ↗</a>`:`<span class="open">—</span>`}</li>`).join("")}</ul></section>`);
+  $("#view").innerHTML = kopf + `<div class="archiv-grid">${karten.join("")}</div>` + renderSucheKarte(jahr);
+  window.scrollTo(0,0);
 }
 
 /* Zeitraum je Klasse: DP-Klassen = 2 Semester, GIG/GSO = 3 Trimester */
@@ -709,7 +867,7 @@ function renderHome(){
   $("#view").innerHTML = renderZugangsKarte() + (tiles
     ? `<div class="grid">${tiles}</div>`
     : `<div class="empty-note">Für diese Klasse sind noch keine Fächer hinterlegt.</div>`)
-    + renderAdminKarte();
+    + renderSucheKarte("") + renderAdminKarte();
   if(SESSION && SESSION.rolle==="admin"){
     if($("#nkFaecher") && !$("#nkFaecher").children.length) nkFaecherNeu();
     befuelleAdminSelects();
@@ -848,7 +1006,7 @@ function zaehleZugaenge(){
 }
 
 /* ─────────────────────── Admin-Upload (GitHub-API) ─────────────────────── */
-const REPO = "temmchen/schuljahr-portal";
+const REPO = "temmchen/CdM";   /* dieses Portal — nicht das Schuljahr-Portal */
 const TOKEN_KEY = "portal_gh_token";
 function tokenLesen(){ try{ return sessionStorage.getItem(TOKEN_KEY)||""; }catch(e){ return ""; } }
 function adminBereichOptionen(klasse){
@@ -1589,7 +1747,11 @@ function renderDetail(){
   window.scrollTo(0,0);
 }
 
-function render(){ if(!SESSION){ renderLogin(); return; } if(state.view==="home") renderHome(); else renderDetail(); }
+function render(){
+  if(!SESSION){ renderLogin(); return; }
+  if(state.archivJahr && SESSION.rolle==="admin" && ARCHIV && state.archivJahr!==ARCHIV.aktiv){ renderArchiv(); return; }
+  if(state.view==="home") renderHome(); else renderDetail();
+}
 
 /* ═══════════════════════════ Datei öffnen/laden ═════════════════════════ */
 async function holeBlobURL(vaultId, dateiId, typ){
@@ -2062,6 +2224,28 @@ $("#view").addEventListener("change", e=>{
   if(e.target.id==="upKlasse"){ $("#upModul").innerHTML = adminModulOptionen(e.target.value);
                                 $("#upBereich").innerHTML = adminBereichOptionen(e.target.value); }
   if(e.target.id==="nkZeitraum"){ nkFaecherNeu(); }
+});
+$("#archivSelect").addEventListener("change", e=>{
+  const j = e.target.value;
+  state.archivJahr = (ARCHIV && j===ARCHIV.aktiv) ? null : j;
+  state.view="home"; state.modul=null;
+  $("#h-jahr").textContent = state.archivJahr ? j.replace("-"," – ")+" · Archiv" : (INDEX.schuljahr||"–");
+  render();
+});
+let sucheTimer = null;
+$("#view").addEventListener("input", e=>{
+  if(e.target.id!=="cdmSucheFeld") return;
+  state.sucheQ = e.target.value;
+  clearTimeout(sucheTimer);
+  sucheTimer = setTimeout(()=>{ const box=$("#cdmSucheErgebnis"); if(box) box.innerHTML = sucheErgebnisHtml(box.dataset.jahr||""); }, 120);
+});
+$("#view").addEventListener("change", e=>{
+  if(e.target.id==="cdmSucheJahr") state.sucheJahr = e.target.value;
+  else if(e.target.id==="cdmSucheArt") state.sucheArt = e.target.value;
+  else if(e.target.id==="cdmSucheModul") state.sucheModul = e.target.value;
+  else return;
+  const box=$("#cdmSucheErgebnis"); if(box) box.innerHTML = sucheErgebnisHtml(box.dataset.jahr||"");
+  if(e.target.id==="cdmSucheJahr"){ ["cdmSucheArt","cdmSucheModul"].forEach(id=>{ const s=$("#"+id); if(s) s.innerHTML = sucheOptionen(id==="cdmSucheArt"?"a":"m", id==="cdmSucheArt"?state.sucheArt:state.sucheModul, id==="cdmSucheArt"?"Alle Arten":"Alle Module", state.sucheJahr); }); }
 });
 $("#klassenSelect").addEventListener("change", e=>{
   state.klasse = e.target.value;
