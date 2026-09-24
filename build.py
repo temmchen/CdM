@@ -33,7 +33,7 @@ import shutil
 import subprocess
 import sys
 import unicodedata
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 try:
@@ -168,6 +168,16 @@ def archiv_daten(dashboard: Path, aktiv: str):
     if fehlend_web:
         raise RuntimeError("Suchwurzel nicht erreichbar: " + ", ".join(fehlend_web))
 
+    def portal_ok(f: Path) -> bool:
+        """Dieselben Ausschlüsse wie die CdM-Suche (suche_index.portal_ausgeschlossen): Bewertungen,
+        Ergebnisse, Passwortlisten, JSON-Rohdaten — auch als Link nie ins Portal."""
+        rel = str(f.relative_to(dashboard))
+        ext = f.suffix.lstrip(".")
+        art = si.art_aus(f.name, rel, ext)
+        if hasattr(si, "portal_ausgeschlossen"):
+            return not si.portal_ausgeschlossen(f.name, rel, ext, art, cfg)
+        return art != "Bewertung"          # älteres suche_index.py
+
     def datei(f: Path) -> dict:
         try:
             st = f.stat()
@@ -184,10 +194,11 @@ def archiv_daten(dashboard: Path, aktiv: str):
         except Exception:
             vz_cfg = {}
 
+    # ALLE Jahresordner (2025-2026 … 2055-2056), auch leere: im Portal wählt der Admin jedes
+    # Schuljahr aus und sieht dessen Dateien samt den jahresunabhängigen (wie jahre_liste() im
+    # Dashboard). Leere Jahre bekommen trotzdem ihre Hauptverzeichnisse („*“ in verzeichnisse.json).
     jahre = {}
     for jd in sorted(p for p in dashboard.iterdir() if p.is_dir() and re.match(r"^\d{4}-\d{4}$", p.name)):
-        if not any(f.is_file() and not f.name.startswith(".") for f in jd.rglob("*")):
-            continue
         eintrag = {"klassen": {}, "organisation": [], "verzeichnisse": []}
         for kl in sorted(p for p in jd.iterdir() if p.is_dir() and not p.name.startswith(".") and p.name != "Organisation"):
             module = {}
@@ -197,21 +208,18 @@ def archiv_daten(dashboard: Path, aktiv: str):
                     d = md / ordner
                     if d.is_dir():
                         # Bewertungsdateien (Grilles, Ergebnislisten) bleiben auch als Link offline —
-                        # dieselbe Einstufung wie in der CdM-Suche (art_aus → „Bewertung").
-                        bereiche[key] = [datei(f) for f in sammle_dateien(d)
-                                         if si.art_aus(f.name, str(f.relative_to(dashboard)), f.suffix.lstrip(".")) != "Bewertung"]
+                        # dieselbe Regel wie in der CdM-Suche.
+                        bereiche[key] = [datei(f) for f in sammle_dateien(d) if portal_ok(f)]
                 if bereiche:
                     module[md.name] = bereiche
             if module:
                 eintrag["klassen"][kl.name] = module
         od = jd / "Organisation"
         if od.is_dir():
-            def keine_bewertung(f: Path) -> bool:
-                return si.art_aus(f.name, str(f.relative_to(dashboard)), f.suffix.lstrip(".")) != "Bewertung"
-            eintrag["organisation"] = [datei(f) for f in sammle_dateien(od) if keine_bewertung(f)]
+            eintrag["organisation"] = [datei(f) for f in sammle_dateien(od) if portal_ok(f)]
             for u in sorted(p for p in od.iterdir() if p.is_dir() and not p.name.startswith(".")):
                 for f in sammle_dateien(u):
-                    if not keine_bewertung(f):
+                    if not portal_ok(f):
                         continue
                     e = datei(f); e["n"] = f"{u.name} / {e['n']}"
                     eintrag["organisation"].append(e)
@@ -228,7 +236,7 @@ def archiv_daten(dashboard: Path, aktiv: str):
         jahre[jd.name] = eintrag
 
     dateien = si.export_portal(cfg)
-    return {"v": 1, "stand": date.today().isoformat(), "aktiv": aktiv, "onedrive": cfg.get("od_web", ""),
+    return {"v": 1, "stand": datetime.now().isoformat(timespec="minutes"), "aktiv": aktiv, "onedrive": cfg.get("od_web", ""),
             "jahre": jahre, "dateien": dateien}
 
 
@@ -503,7 +511,9 @@ def main():
                         fid = vorher_d["fid"]                 # Chiffrat bleibt Byte-gleich
                         zaehler["wiederverwendet"] += 1
                     else:
-                        fid = (vorher_d or {}).get("fid") or secrets.token_hex(12)
+                        # Neuer Inhalt → neue ID: sonst zeigt der Browser (force-cache) still die alte
+                        # Fassung. Das alte Chiffrat räumt die Schleife unten weg.
+                        fid = secrets.token_hex(12)
                         (vdir / "f" / f"{fid}.enc").write_bytes(
                             verschluessele(k_vault, quelle.read_bytes()))
                         zaehler["neu"] += 1

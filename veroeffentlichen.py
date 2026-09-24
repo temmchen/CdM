@@ -41,15 +41,17 @@ AKZENTE = ["eltec", "mint", "prodi"]
 
 sys.path.insert(0, str(HIER))
 import verwaltung                              # neues_passwort(), speichere()
-try:
-    from build import archiv_fingerprint       # Hash über Archiv + CdM-Suchindex (nur Admin)
-except (Exception, SystemExit):                # build.py fehlt/kaputt/ohne cryptography → Prüfung entfällt
-    archiv_fingerprint = None
 
 
 def archiv_stand(dashboard, jahr):
-    """→ (Fingerabdruck, "") des Admin-Archivs (Jahrgangs-Links + CdM-Suchindex) oder (None, Grund)."""
-    if archiv_fingerprint is None:
+    """→ (Fingerabdruck, "") des Admin-Archivs (Jahrgangs-Links + CdM-Suchindex) oder (None, Grund).
+    build.py wird erst HIER geladen (bzw. neu geladen) — also nach dem git pull. Sonst rechnete der
+    zweite Mac nach einem Code-Update einmal mit dem alten build.py und baute unnötig neu."""
+    try:
+        import importlib
+        import build
+        archiv_fingerprint = importlib.reload(build).archiv_fingerprint
+    except (Exception, SystemExit):            # build.py fehlt/kaputt/ohne cryptography → Prüfung entfällt
         return None, "build.py nicht ladbar (Paket cryptography?)"
     try:
         return archiv_fingerprint(dashboard, jahr)

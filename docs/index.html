@@ -243,6 +243,26 @@
 
   /* ---------- 🗄️ Archiv & CdM-Suche (nur Admin) ---------- */
   .archiv-kopf{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 16px}
+  /* Aktualisieren (Kopfzeile) und erneute Admin-Anmeldung nach einer Veröffentlichung */
+  #refreshBtn .rf-ic{display:inline-block;font-size:15px;line-height:1}
+  #refreshBtn.laeuft .rf-ic{animation:rfdreh .9s linear infinite}
+  #refreshBtn:disabled{opacity:.7;cursor:progress}
+  @keyframes rfdreh{to{transform:rotate(360deg)}}
+  .reauth form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:4px 15px 2px}
+  .reauth input[type=password]{flex:1 1 240px;padding:10px 13px;border-radius:11px;border:1px solid var(--line2);
+    background:var(--card2);color:var(--tx);font:inherit;font-size:14px}
+  .reauth input[type=password]:focus{outline:none;border-color:var(--accent)}
+  .reauth .login-status{padding:0 15px 10px}
+  .cat details.gruppe{border-top:1px solid var(--line)}
+  .cat details.gruppe > summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;
+    padding:9px 15px;font-size:13px;font-weight:650;color:var(--tx2)}
+  .cat details.gruppe > summary::-webkit-details-marker{display:none}
+  .cat details.gruppe > summary::before{content:"▸";color:var(--tx3);width:10px}
+  .cat details.gruppe[open] > summary::before{content:"▾"}
+  .cat details.gruppe > summary .cnt{margin-left:auto}
+  .such-mehr{display:flex;justify-content:center;padding:10px 0 4px}
+  .aktiv-offline{margin-top:22px}
+  .aktiv-offline > h2{font-size:15px;margin:0 0 12px;color:var(--tx2)}
   .archiv-kopf .hinweis{color:var(--tx3);font-size:12.5px}
   .archiv-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px;align-items:start;margin-bottom:18px}
   .archiv-grid .cat h4{margin:10px 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3)}
@@ -334,7 +354,8 @@
     </div>
     <span class="rolle-chip nur-angemeldet" id="rolleChip"><span class="dot"></span><span id="rolleText"></span></span>
     <span class="spacer"></span>
-    <select class="klass-select" id="archivSelect" title="Jahrgang ansehen (nur Admin) — ältere Jahrgänge als OneDrive-Links" aria-label="Jahrgang" hidden></select>
+    <select class="klass-select" id="archivSelect" title="Schuljahr ansehen (nur Admin) — Dateien des Jahres plus die jahresunabhängigen, als OneDrive-Links" aria-label="Schuljahr" hidden></select>
+    <button class="btn ghost nur-angemeldet" id="refreshBtn" type="button" title="Portal-Daten frisch von GitHub laden — du bleibst angemeldet" aria-label="Portal aktualisieren"><span class="rf-ic">↻</span><span class="rf-tx">Aktualisieren</span></button>
     <select class="klass-select nur-angemeldet" id="klassenSelect" title="Klasse wählen" aria-label="Klasse wählen"></select>
     <div class="seg nur-angemeldet" id="seg">
       <button data-sem="1" class="on">Semester 1</button>
@@ -497,15 +518,18 @@ let SESSION = null;       // { rolle, label, vaults:[{id,k,manifest}] }
 let DATEN = null;         // { klassen:{ key:{ name, faecher, module, bereiche:Set } } }
 let ARCHIV = null;        // nur Admin: { aktiv, jahre:{ "2025-2026":{klassen,organisation,verzeichnisse} }, dateien:[…] }
 let ARCHIV_STATUS = "";   // "" | "alt" (Portal ohne Archiv gebaut) | "browser" | "fehler"
-const state = { klasse:null, sem:loadSem(), view:"home", modul:null, archivJahr:null, sucheQ:"", sucheJahr:"", sucheArt:"", sucheModul:"" };
+const state = { klasse:null, sem:loadSem(), view:"home", modul:null, archivJahr:null, sucheQ:"", sucheJahr:"", sucheArt:"", sucheModul:"", sucheMax:150 };
 const vaultKeyCache = new Map();   // vaultId → CryptoKey
 const blobCache = new Map();       // dateiId → BlobURL
+/* Nach „Aktualisieren“: ?t=<Zeit> an jedem Abruf — an Browser- UND GitHub-Pages-Zwischenspeicher
+   (max-age=600) vorbei. Beim normalen Laden leer. */
+let FRISCH = "";
 
 function loadSem(){ try{ const v=localStorage.getItem(SEM_KEY); if(v==="1"||v==="2"||v==="3") return Number(v); if(v==="alle") return "alle"; }catch(e){} return 1; }
 
 async function ladeIndex(){
   if(INDEX) return INDEX;
-  const r = await fetch("vaults/index.json", {cache:"no-store"});
+  const r = await fetch("vaults/index.json"+FRISCH, {cache:"no-store"});
   if(!r.ok) throw new Error("index");
   INDEX = await r.json();
   $("#h-jahr").textContent = INDEX.schuljahr || "–";
@@ -542,13 +566,16 @@ async function pruefePasswort(passwort){
   return null;
 }
 
-async function ladeDaten(session){
+let MANIFEST_FEHLT = 0;   /* beim Aktualisieren übersprungene Tresore (auf Pages noch nicht da) */
+async function ladeDaten(session, tolerant){
   const klassen = {};
+  MANIFEST_FEHLT = 0;
   for(const v of session.vaults){
     let key = vaultKeyCache.get(v.id);
     if(!key){ key = await importiereVaultKey(v.k); vaultKeyCache.set(v.id, key); }
-    const r = await fetch(v.manifest, {cache:"no-store"});
-    if(!r.ok) throw new Error("manifest");
+    let r = null;
+    try{ r = await fetch(v.manifest+FRISCH, {cache:"no-store"}); }catch(e){ if(!tolerant) throw e; }
+    if(!r || !r.ok){ if(tolerant){ MANIFEST_FEHLT++; continue; } throw new Error("manifest"); }
     const m = JSON.parse(new TextDecoder().decode(await entschluesseleBlock(key, await r.arrayBuffer())));
 
     if(["__proto__","constructor","prototype"].includes(m.klasse)) continue;
@@ -640,6 +667,7 @@ function renderLogin(){
         return;
       }
       status.textContent = "Entschlüssele Inhalte …";
+      session.bekannt = (INDEX && INDEX.vaults || []).map(v=>v.id);
       SESSION = session;
       DATEN = await ladeDaten(session);
       sessionSpeichern(session);
@@ -670,11 +698,12 @@ function rolleText(){
   return `Klasse ${SESSION.label.replace(/^Klasse\s+/i,"")} · Schüler`;
 }
 
-async function starteOberflaeche(){
+async function starteOberflaeche(behalten){
   document.body.classList.add("angemeldet");
   $("#rolleText").textContent = rolleText();
   const keys = Object.keys(DATEN.klassen).sort();
   let merk=null; try{ merk=localStorage.getItem(KLASSE_KEY); }catch(e){}
+  if(behalten && behalten.klasse) merk = behalten.klasse;
   state.klasse = (merk && DATEN.klassen[merk]) ? merk : keys[0];
   const sel = $("#klassenSelect");
   sel.innerHTML = keys.map(k=>`<option value="${esc(k)}">${esc(DATEN.klassen[k].name)}</option>`).join("");
@@ -685,9 +714,109 @@ async function starteOberflaeche(){
   document.title = "Portal · " + (INDEX.schuljahr||"");
   await ladeZugaenge();   /* Admin: Zugangsliste öffnen, damit die Karte gefüllt ist */
   await ladeArchiv();     /* Admin: Jahrgänge + CdM-Suche (OneDrive-Links) */
+  state.view="home"; state.modul=null; state.archivJahr=null;
+  if(behalten){           /* „Aktualisieren“ / neu entsperrt: dort weitermachen, wo man war */
+    if(behalten.archivJahr && ARCHIV && archivJahre().includes(behalten.archivJahr)){ state.archivJahr = behalten.archivJahr; JAHR_GEMERKT = null; }
+    else if(behalten.archivJahr && !ARCHIV) JAHR_GEMERKT = behalten.archivJahr;   /* nach Entsperren/Neuladen wieder dorthin */
+    /* Detailansicht nur, wenn nichts zu entsperren ist — die Entsperr-Karte steht auf der Startseite */
+    if(behalten.view==="detail" && behalten.modul && !brauchtEntsperren()){ state.view="detail"; state.modul=behalten.modul; }
+  }
   archivSelectFuellen();
-  state.view="home"; state.modul=null;
+  kopfJahr();
+  const st = standText();
+  $("#refreshBtn").title = "Portal-Daten frisch von GitHub laden — du bleibst angemeldet" + (st ? " · Stand: "+st : "");
   render();
+  if(behalten && behalten.y) window.scrollTo(0, behalten.y);
+}
+
+/* ═══════════════════════════ Aktualisieren ══════════════════════════════ */
+/* Holt index.json, Manifeste, Archiv und Zugangsliste frisch von GitHub — am Browser- und am
+   Pages-Zwischenspeicher vorbei — und zeichnet neu, ohne Abmelden; Ansicht und Schuljahr bleiben.
+   Neue Dateien aus OneDrive kommen erst mit dem nächsten Veröffentlichen am Mac ins Portal. */
+let JAHR_GEMERKT = null;        /* gewähltes Jahr, solange das Archiv fehlt (entsperren / Netz) */
+let WEB_GESCHRIEBEN = 0;        /* Zeitpunkt der letzten eigenen Änderung an index.json über die Verwaltung */
+function merkeAnsicht(){ return { archivJahr: state.archivJahr || JAHR_GEMERKT, klasse:state.klasse, view:state.view, modul:state.modul, y:window.scrollY }; }
+class PagesNochAlt extends Error {}
+async function holeIndexFrisch(){
+  FRISCH = "?t=" + Date.now();
+  /* Eben erst über die Verwaltung geschrieben? GitHub Pages braucht 1–2 min für den neuen Stand —
+     so lange die index.json direkt aus dem Repo holen, sonst käme die ALTE zurück. */
+  if(WEB_GESCHRIEBEN && Date.now() - WEB_GESCHRIEBEN < 15*60*1000){
+    const token = tokenLesen();
+    if(!token) throw new PagesNochAlt();
+    const a = await ghAPI("contents/docs/vaults/index.json?ref=main", {}, token);
+    INDEX = JSON.parse(new TextDecoder().decode(b64zu(a.content.replace(/\s/g,""))));
+    $("#h-jahr").textContent = INDEX.schuljahr || "–";
+    return;
+  }
+  const alt = INDEX; INDEX = null;
+  try{ await ladeIndex(); }catch(e){ INDEX = alt; throw e; }
+}
+/* Tresore, die es nicht mehr gibt, aus der Sitzung nehmen; der Admin bekommt neu
+   hinzugekommene Tresore dazu, solange sein Schlüssel noch passt. */
+async function sitzungAbgleichen(){
+  const da = new Map((INDEX.vaults||[]).map(v=>[v.id, v]));
+  const alleIds = [...da.keys()];
+  const neuImPortal = SESSION.bekannt ? alleIds.filter(id=>!SESSION.bekannt.includes(id)) : [];
+  if(!SESSION.bekannt) SESSION.bekannt = alleIds;
+  SESSION.vaults = SESSION.vaults.filter(v=>da.has(v.id)).map(v=>({...v, manifest: da.get(v.id).manifest || v.manifest}));
+  if(SESSION.rolle==="admin" && SESSION.kek && SESSION.pid){
+    let kek = null;
+    try{ kek = await adminKekKey(); }catch(e){ kek = null; }
+    if(kek) for(const v of INDEX.vaults||[]){
+      if(SESSION.vaults.some(x=>x.id===v.id)) continue;
+      for(const w of v.wraps||[]){
+        if(w.p !== SESSION.pid) continue;
+        try{ const n = await entschluesseleJSON(kek, w.iv, w.ct); SESSION.vaults.push({id:v.id, k:n.k, manifest:v.manifest}); break; }
+        catch(e){ /* Schlüssel passt nicht mehr (neu veröffentlicht) — Entsperr-Karte */ }
+      }
+    }
+  }
+  sessionSpeichern(SESSION);
+  /* Profs und Lese-Zugänge haben keinen Schlüssel für neu hinzugekommene Klassen in der Sitzung */
+  return SESSION.rolle!=="admin" && neuImPortal.some(id=>!SESSION.vaults.some(v=>v.id===id));
+}
+async function aktualisieren(){
+  const btn = $("#refreshBtn"), tx = btn.querySelector(".rf-tx");
+  if(!SESSION || btn.disabled) return;
+  btn.disabled = true; btn.classList.add("laeuft");
+  const merk = merkeAnsicht();
+  try{
+    await holeIndexFrisch();
+    blobCache.forEach(url=>URL.revokeObjectURL(url)); blobCache.clear();
+    const neueKlassen = await sitzungAbgleichen();
+    if(!SESSION.vaults.length){   /* alle Tresore neu verschlüsselt — alte Sitzung passt nirgends mehr */
+      toast("Das Portal wurde neu verschlüsselt — bitte neu anmelden.");
+      setTimeout(abmelden, 1600);
+      return;
+    }
+    const daten = await ladeDaten(SESSION, true);
+    if(!Object.keys(daten.klassen).length) throw new Error("keine Daten");
+    DATEN = daten;
+    await starteOberflaeche(merk);
+    let meldung = "Aktualisiert ✓";
+    if(brauchtEntsperren()) meldung = "Bitte oben entsperren";
+    else if(ARCHIV_STATUS==="netz"){ meldung = "Archiv fehlt"; toast("Archiv und CdM-Suche nicht geladen — Verbindung prüfen und erneut aktualisieren."); }
+    if(MANIFEST_FEHLT) toast(`${MANIFEST_FEHLT} Tresor(e) sind auf GitHub Pages noch nicht da — in 1–2 min erneut aktualisieren.`);
+    if(neueKlassen) toast("Im Portal gibt es neue Klassen — zum Anzeigen einmal ab- und wieder anmelden.");
+    tx.textContent = meldung;
+    setTimeout(()=>{ tx.textContent = "Aktualisieren"; }, 3000);
+  }catch(e){
+    toast(e instanceof PagesNochAlt
+      ? "Deine Änderung wird auf GitHub Pages noch veröffentlicht (1–2 min) — danach erneut aktualisieren."
+      : "Aktualisieren fehlgeschlagen — Verbindung prüfen und erneut versuchen.");
+  }finally{
+    btn.disabled = false; btn.classList.remove("laeuft");
+  }
+}
+/* Entsperr-Karte: neue Admin-Sitzung aus dem Passwort (nicht gespeichert), Ansicht bleibt */
+async function adminSitzungErneuern(s){
+  const merk = merkeAnsicht();
+  if(!state.archivJahr && merk.archivJahr) merk.y = 0;
+  s.bekannt = (INDEX.vaults||[]).map(v=>v.id);
+  SESSION = s; sessionSpeichern(s);
+  DATEN = await ladeDaten(s);
+  await starteOberflaeche(merk);
 }
 
 /* ═══════════════════════════ Archiv & CdM-Suche (nur Admin) ═════════════════ */
@@ -695,31 +824,87 @@ async function starteOberflaeche(){
    OneDrive-Weblinks. Es ist ausschließlich unter dem Admin-KEK verschlüsselt
    (build.py) — Profs, Kurse, Leser und Fremde können es nicht öffnen. */
 async function ladeArchiv(){
-  ARCHIV = null; ARCHIV_STATUS = "";
+  ARCHIV = null; ARCHIV_STATUS = ""; JAHR_ZAHL = new Map();
   if(!SESSION || SESSION.rolle !== "admin") return;
   const a = INDEX && INDEX.archiv;
   if(!a || !a.datei){ ARCHIV_STATUS = "alt"; return; }
+  let roh;
   try{
-    const r = await fetch(a.datei, {cache:"no-store"});
+    const r = await fetch(a.datei+FRISCH, {cache:"no-store"});
     if(!r.ok) throw new Error("archiv");
-    let buf = await entschluesseleBlock(await adminKekKey(), await r.arrayBuffer());
+    roh = await r.arrayBuffer();
+  }catch(e){ ARCHIV_STATUS = "netz"; return; }   /* nicht geladen — kein Schlüsselproblem */
+  try{
+    let buf = await entschluesseleBlock(await adminKekKey(), roh);
     if(a.gz){
       if(!("DecompressionStream" in window)){ ARCHIV_STATUS = "browser"; return; }
       buf = await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
     }
     ARCHIV = JSON.parse(new TextDecoder().decode(buf));
+    (ARCHIV.dateien||[]).forEach(d=>{ const j = dateiJahr(d); if(j) JAHR_ZAHL.set(j, (JAHR_ZAHL.get(j)||0)+1); });
   }catch(e){ ARCHIV_STATUS = "fehler"; }
 }
-function archivJahre(){ return ARCHIV ? Object.keys(ARCHIV.jahre||{}).sort().reverse() : []; }
+/* ── Schuljahre ──────────────────────────────────────────────────────────
+   Die Auswahl zeigt jedes Schuljahr vom ältesten mit Dateien bis 30 Jahre ab dem aktiven
+   (Jahresordner 2025-2026 … 2055-2056), auch leere. Welches Jahr eine Datei hat, steht im
+   PFAD: Jahresordner („2026-2027/ModuleF/…“), sonst das Jahr im Namen der Wurzel („CdM 2025-2026“).
+   Alles andere ist jahresunabhängig (New CdM/Organisation mit Rechnungen, Skripte, …) und
+   erscheint in JEDEM Jahr. Bewusst nicht d.j: das ist außerhalb der Jahresordner nur geschätzt. */
+const JAHRE_AB_AKTIV = 30;
+const JAHRFREI = "jahresunabhaengig";          /* Wert im Jahres-Filter der CdM-Suche */
+const RAUSCHEN = /^(readme|liesmich)\.md$|^aktuelles-jahr\.txt$/i;   /* Hilfsdateien der Ordner */
+let JAHR_ZAHL = new Map();                     /* Jahr → Anzahl Dateien (aus der CdM-Suche) */
+function dateiJahr(d){
+  if(d.jz !== undefined) return d.jz;
+  const m = /^(\d{4})-(\d{4})(?:\/|$)/.exec(d.p||"") || /(\d{4})-(\d{4})/.exec(d.r||"");
+  return d.jz = (m && Number(m[2])===Number(m[1])+1) ? `${m[1]}-${m[2]}` : "";
+}
+function istRauschen(d){ return RAUSCHEN.test(String(d.p||"").split("/").pop()); }
+/* gehört die Datei zur Ansicht dieses Jahres? — Jahresdateien plus die jahresunabhängigen */
+function imJahr(d, jahr){
+  if(!jahr) return true;
+  const j = dateiJahr(d);
+  if(jahr===JAHRFREI) return !j;
+  return j===jahr || (!j && !istRauschen(d));
+}
+function jahrStart(j){ const m=/^(\d{4})-\d{4}$/.exec(j||""); return m ? Number(m[1]) : 0; }
+function archivJahre(){
+  if(!ARCHIV) return [];
+  const s = new Set(Object.keys(ARCHIV.jahre||{}).filter(jahrStart));
+  JAHR_ZAHL.forEach((n,j)=>s.add(j));
+  const a = jahrStart(ARCHIV.aktiv);
+  if(a) for(let i=0;i<JAHRE_AB_AKTIV;i++) s.add(`${a+i}-${a+i+1}`);
+  const st = [...s].map(jahrStart).filter(Boolean);
+  if(st.length) for(let y=Math.min(...st); y<=Math.max(...st); y++) s.add(`${y}-${y+1}`);   /* keine Lücken */
+  return [...s].sort();
+}
+function jahrArt(j){ const a = ARCHIV ? ARCHIV.aktiv : ""; return j===a ? "aktiv" : (j < a ? "Archiv" : "kommend"); }
+function jahrOption(j){
+  const n = JAHR_ZAHL.get(j) || 0, art = jahrArt(j);
+  const text = j.replace("-"," – ") + (art==="aktiv" ? " ★ aktiv" : ` · ${art}${n ? " · "+n.toLocaleString("de-DE") : " · leer"}`);
+  return `<option value="${esc(j)}">${esc(text)}</option>`;
+}
 function archivSelectFuellen(){
   const sel = $("#archivSelect"); if(!sel) return;
   const jahre = archivJahre();
   if(!SESSION || SESSION.rolle!=="admin" || !jahre.length){ sel.hidden = true; return; }
-  const aktiv = ARCHIV.aktiv;
-  if(!jahre.includes(aktiv)) jahre.unshift(aktiv);
-  sel.innerHTML = jahre.map(j=>`<option value="${esc(j)}">${esc(j.replace("-"," – "))}${j===aktiv?" ★ aktiv":" · Archiv"}</option>`).join("");
-  sel.value = state.archivJahr || aktiv;
+  sel.innerHTML = jahre.map(jahrOption).join("");
+  sel.value = state.archivJahr || ARCHIV.aktiv;
   sel.hidden = false;
+}
+function kopfJahr(){
+  const j = state.archivJahr;
+  $("#h-jahr").textContent = (j && ARCHIV) ? `${j.replace("-"," – ")} · ${jahrArt(j)}` : ((INDEX && INDEX.schuljahr) || "–");
+}
+function zeitText(s){
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}:\d{2}))?/.exec(s||"");
+  return m ? `${m[3]}.${m[2]}.${m[1]}${m[4] ? " "+m[4] : ""}` : (s||"?");
+}
+function standText(){
+  const t = [];
+  if(INDEX && INDEX.erstellt) t.push("Portal " + zeitText(INDEX.erstellt));
+  if(ARCHIV && ARCHIV.stand) t.push("Archiv/Suche " + zeitText(ARCHIV.stand));
+  return t.join(" · ");
 }
 function foldText(s){
   return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase()
@@ -736,32 +921,42 @@ function sucheTreffer(q, jahr, art, modul, max=150){
   if(!ARCHIV) return {treffer:[], anzahl:0};
   const terme = foldText(q).split(/\s+/).filter(Boolean);
   let alle = ARCHIV.dateien || [];
-  if(jahr) alle = alle.filter(d=>d.j===jahr);
+  if(jahr) alle = alle.filter(d=>imJahr(d, jahr));
   if(art) alle = alle.filter(d=>d.a===art);
   if(modul) alle = alle.filter(d=>d.m===modul);
   if(terme.length){
-    alle = alle.filter(d=>{ const h = foldText(d.n+" "+d.p+" "+(d.a||"")+" "+(d.m||"")+" "+(d.j||"")+" "+(d.r||"")); return terme.every(t=>h.includes(t)); });
+    alle = alle.filter(d=>{ const h = foldText(d.n+" "+d.p+" "+(d.a||"")+" "+(d.m||"")+" "+(dateiJahr(d)||"jahresunabhängig")+" "+(d.r||"")); return terme.every(t=>h.includes(t)); });
   }
   return { treffer: alle.slice(0,max), anzahl: alle.length };
 }
 function sucheOptionen(feld, aktuell, alleText, jahr){
   let basis = ARCHIV ? (ARCHIV.dateien||[]) : [];
-  if(jahr) basis = basis.filter(d=>d.j===jahr);
+  if(jahr) basis = basis.filter(d=>imJahr(d, jahr));
   const z = new Map(); basis.forEach(d=>{ const k=d[feld]||""; if(k) z.set(k,(z.get(k)||0)+1); });
   const werte=[...z.entries()].sort((a,b)=>b[1]-a[1]);
   return `<option value="">${esc(alleText)}</option>`+werte.map(([w,n])=>`<option value="${esc(w)}" ${w===aktuell?"selected":""}>${esc(w)} · ${n}</option>`).join("");
+}
+function sucheJahrOptionen(aktuell){
+  const frei = (ARCHIV && ARCHIV.dateien || []).filter(d=>!dateiJahr(d)).length;
+  const jahre = [...JAHR_ZAHL.entries()].sort((a,b)=>b[0].localeCompare(a[0]));
+  return `<option value="">Alle Jahre</option>`
+    + jahre.map(([j,n])=>`<option value="${esc(j)}" ${j===aktuell?"selected":""}>${esc(j)} · ${n.toLocaleString("de-DE")}</option>`).join("")
+    + (frei ? `<option value="${JAHRFREI}" ${aktuell===JAHRFREI?"selected":""}>nur jahresunabhängige · ${frei}</option>` : "");
 }
 function renderSucheKarte(jahrFest){
   if(!SESSION || SESSION.rolle!=="admin") return "";
   if(!ARCHIV){
     const text = ARCHIV_STATUS==="alt" ? "Dieses Portal wurde noch ohne Archiv-Paket veröffentlicht — einmal am Mac neu veröffentlichen (build.py)."
       : ARCHIV_STATUS==="browser" ? "Dieser Browser kann das Archiv-Paket nicht entpacken (DecompressionStream fehlt) — bitte aktuellen Safari/Chrome nutzen."
-      : ARCHIV_STATUS==="fehler" ? "Das Archiv ließ sich nicht entschlüsseln — bitte einmal ab- und neu anmelden." : "Archiv wird geladen …";
+      : ARCHIV_STATUS==="netz" ? "Das Archiv ließ sich nicht laden — Verbindung prüfen, dann ↻ Aktualisieren."
+      : ARCHIV_STATUS==="fehler" ? (brauchtEntsperren() ? "Das Archiv ließ sich nicht entschlüsseln — oben einmal mit dem Admin-Passwort entsperren."
+          : "Das Archiv wurde unter einem anderen Admin-Schlüssel gebaut (z. B. nach „Passwort neu würfeln → Admin“) — am Mac einmal veröffentlichen (🚀), dann ↻ Aktualisieren.")
+      : "Archiv wird geladen …";
     return `<section class="cat" style="--fach:var(--mint)"><h3><span class="ic">🔎</span> CdM-Suche <span class="hint-sub">nur in der Admin-Sicht</span></h3><div class="cat-empty">${esc(text)}</div></section>`;
   }
   const jahr = jahrFest || state.sucheJahr;
-  const n = (ARCHIV.dateien||[]).filter(d=>!jahr || d.j===jahr).length;
-  const jahrSel = jahrFest ? "" : `<select id="cdmSucheJahr" title="Jahrgang">${sucheOptionen("j", state.sucheJahr, "Alle Jahre")}</select>`;
+  const n = (ARCHIV.dateien||[]).filter(d=>imJahr(d, jahr)).length;
+  const jahrSel = jahrFest ? "" : `<select id="cdmSucheJahr" title="Schuljahr (mit den jahresunabhängigen Dateien)">${sucheJahrOptionen(state.sucheJahr)}</select>`;
   return `<section class="cat" style="--fach:var(--mint)">
     <h3><span class="ic">🔎</span> CdM-Suche <span class="hint-sub">Prüfungsfragen · Fragebögen · Kandidatenbögen · Skripte — öffnet in OneDrive</span><span class="cnt">${n}</span></h3>
     <div class="such-feld">
@@ -772,24 +967,27 @@ function renderSucheKarte(jahrFest){
     </div>
     <div id="cdmSucheErgebnis" data-jahr="${esc(jahrFest||"")}">${sucheErgebnisHtml(jahrFest)}</div>
     <div class="admin-hilfe">Der Index umfasst alle Dateien der CdM-Ordner in OneDrive (Namen und Pfade, kein Inhalt) und wird bei jedem
-      Veröffentlichen am Mac erneuert (Stand ${esc(ARCHIV.stand||"?")}). „Öffnen“ führt in dein OneDrive — dort einmal im 365-Konto angemeldet sein.</div>
+      Veröffentlichen am Mac erneuert (Stand ${esc(zeitText(ARCHIV.stand))}). Mit einem Schuljahr gewählt: dessen Dateien plus die
+      jahresunabhängigen. „Öffnen“ führt in dein OneDrive — dort einmal im 365-Konto angemeldet sein.</div>
   </section>`;
 }
 function sucheErgebnisHtml(jahrFest){
   const jahr = jahrFest || state.sucheJahr;
-  const {treffer, anzahl} = sucheTreffer(state.sucheQ, jahr, state.sucheArt, state.sucheModul);
+  const {treffer, anzahl} = sucheTreffer(state.sucheQ, jahr, state.sucheArt, state.sucheModul, state.sucheMax);
   if(!anzahl) return `<div class="such-leer">Nichts gefunden — weniger Wörter oder Filter zurücksetzen (Umlaute sind egal).</div>`;
-  const kopf = `<div class="such-status"><b>${anzahl.toLocaleString("de-DE")}</b> Treffer${treffer.length<anzahl?` · die ersten ${treffer.length}`:""}</div>`;
+  const kopf = `<div class="such-status"><b>${anzahl.toLocaleString("de-DE")}</b> Treffer${treffer.length<anzahl?` · die ersten ${treffer.length.toLocaleString("de-DE")}`:""}</div>`;
   return kopf + treffer.map(d=>{
     const ordner = d.p.includes("/") ? d.p.slice(0, d.p.lastIndexOf("/")) : "";
-    const chips = [d.j?`<span class="chip">${esc(d.j)}</span>`:"", d.m?`<span class="chip">${esc(d.m)}</span>`:"", d.a?`<span class="chip">${esc(d.a)}</span>`:""].join("");
+    const dj = dateiJahr(d);
+    const chips = [`<span class="chip">${esc(dj ? dj : "jahresunabhängig")}</span>`, d.m?`<span class="chip">${esc(d.m)}</span>`:"", d.a?`<span class="chip">${esc(d.a)}</span>`:""].join("");
     return `<div class="such-zeile">
       <div class="such-typ">${esc(TYP_KURZ[d.t]||String(d.t||"?").toUpperCase())}</div>
       <div style="min-width:0"><div class="such-name" title="${esc(d.n)}">${hebeHervor(d.n, state.sucheQ)}</div>
         <div class="such-pfad" title="${esc(d.r+" › "+d.p)}"><b>${esc(d.r||"")}</b> › ${hebeHervor(ordner, state.sucheQ)} · ${esc(d.d||"")}${d.g?" · "+groesseText(d.g):""}</div>
         <div class="such-chips">${chips}</div></div>
       <a class="open" href="${esc(d.w)}" target="_blank" rel="noopener">Öffnen ↗</a></div>`;
-  }).join("");
+  }).join("") + (treffer.length < anzahl
+    ? `<div class="such-mehr"><button class="btn ghost" type="button" id="sucheMehr">Weitere ${Math.min(150, anzahl-treffer.length)} zeigen</button></div>` : "");
 }
 const ARCHIV_KATS = [ {key:"skripte",name:"Skripte",icon:"📘"}, {key:"pruefungen",name:"Prüfungen",icon:"📝"},
   {key:"examen",name:"Examen",icon:"🎓"}, {key:"repechage",name:"Examen de repêchage",icon:"🔁"},
@@ -798,29 +996,127 @@ function archivLinkZeile(d){
   const a = d.w ? `<a class="open" href="${esc(d.w)}" target="_blank" rel="noopener">Öffnen ↗</a>` : `<span class="open" title="nur auf dem Mac">—</span>`;
   return `<li class="docrow ${d.w?'':'dead'}"><span class="di">${FILE_SVG}</span><span class="dn">${esc(d.n)}${d.g?` <span class="lokal-tag">${groesseText(d.g)}</span>`:""}</span>${a}</li>`;
 }
-function renderArchiv(){
-  const jahr = state.archivJahr, J = ARCHIV && ARCHIV.jahre && ARCHIV.jahre[jahr];
-  const kopf = `<div class="archiv-kopf"><h2 style="margin:0;font-size:18px">🗄️ Archiv ${esc(jahr.replace("-"," – "))}</h2>
-    <span class="hinweis">nur Admin · alle Dateien öffnen in OneDrive (SharePoint) · aktiv im Portal ist ${esc((ARCHIV.aktiv||"").replace("-"," – "))}</span></div>`;
-  if(!J){ $("#view").innerHTML = kopf + `<div class="empty-note">Für diesen Jahrgang liegt nichts im Dashboard-Ordner.</div>`; return; }
+/* Karten eines Schuljahres (nur OneDrive-Links, nur Admin). nurOffline: im aktiven Jahr nur die
+   Bereiche, die NICHT als Kachel online sind (Examen, Repêchage) — der Rest steht in den Kacheln. */
+const OFFLINE_KATS = new Set(["examen","repechage"]);
+function klassenKarten(J, nurOffline){
   const karten = [];
   for(const [kl, module] of Object.entries(J.klassen||{})){
     for(const [mk, bereiche] of Object.entries(module||{})){
-      const teile = ARCHIV_KATS.filter(k=>bereiche[k.key]).map(k=>{
+      /* im aktiven Jahr nur Offline-Bereiche MIT Dateien — leere Examen-Karten wären nur Rauschen */
+      const kats = ARCHIV_KATS.filter(k=>bereiche[k.key] && (!nurOffline || (OFFLINE_KATS.has(k.key) && bereiche[k.key].length)));
+      if(!kats.length) continue;
+      const teile = kats.map(k=>{
         const l = bereiche[k.key]||[];
         return `<h4>${k.icon} ${esc(k.name)} <span class="cnt">${l.length}</span></h4>` + (l.length ? `<ul class="doclist">${l.map(archivLinkZeile).join("")}</ul>` : `<div class="cat-empty">leer</div>`);
       }).join("");
       karten.push(`<section class="cat" style="--fach:var(--eltec)"><h3><span class="ic">📚</span> ${esc(kl)}${mk!==kl?` · ${esc(mk)}`:""}</h3>${teile}</section>`);
     }
   }
+  return karten;
+}
+function organisationKarte(J){
   const org = J.organisation||[];
-  karten.push(`<section class="cat" style="--fach:var(--accent)"><h3><span class="ic">🏛️</span> Organisation <span class="cnt">${org.length}</span></h3>`
-    + (org.length ? `<ul class="doclist">${org.map(archivLinkZeile).join("")}</ul>` : `<div class="cat-empty">leer</div>`) + `</section>`);
+  return `<section class="cat" style="--fach:var(--accent)"><h3><span class="ic">🏛️</span> Organisation <span class="hint-sub">dieses Schuljahres</span><span class="cnt">${org.length}</span></h3>`
+    + (org.length ? `<ul class="doclist">${org.map(archivLinkZeile).join("")}</ul>` : `<div class="cat-empty">leer</div>`) + `</section>`;
+}
+function verzeichnisKarte(J){
   const vz = J.verzeichnisse||[];
-  karten.push(`<section class="cat" style="--fach:var(--mint)"><h3><span class="ic">📂</span> Hauptverzeichnisse <span class="cnt">${vz.length}</span></h3>
-    <ul class="doclist">${vz.map(v=>`<li class="docrow ${v.w?'':'dead'}"><span class="di">📁</span><span class="dn">${esc(v.n)}${v.lokal?` <span class="lokal-tag">nur am Mac</span>`:""}${v.h?`<div class="such-pfad" style="white-space:normal">${esc(v.h)}</div>`:""}</span>${v.w?`<a class="open" href="${esc(v.w)}" target="_blank" rel="noopener">OneDrive ↗</a>`:`<span class="open">—</span>`}</li>`).join("")}</ul></section>`);
-  $("#view").innerHTML = kopf + `<div class="archiv-grid">${karten.join("")}</div>` + renderSucheKarte(jahr);
+  if(!vz.length) return "";
+  return `<section class="cat" style="--fach:var(--mint)"><h3><span class="ic">📂</span> Hauptverzeichnisse <span class="cnt">${vz.length}</span></h3>
+    <ul class="doclist">${vz.map(v=>`<li class="docrow ${v.w?'':'dead'}"><span class="di">📁</span><span class="dn">${esc(v.n)}${v.lokal?` <span class="lokal-tag">nur am Mac</span>`:""}${v.h?`<div class="such-pfad" style="white-space:normal">${esc(v.h)}</div>`:""}</span>${v.w?`<a class="open" href="${esc(v.w)}" target="_blank" rel="noopener">OneDrive ↗</a>`:`<span class="open">—</span>`}</li>`).join("")}</ul></section>`;
+}
+/* Jahresunabhängige Dateien (Organisation, Rechnungen, Skripte …) — in JEDEM Schuljahr.
+   Quelle ist die CdM-Suche: dort sind Bewertungsdateien und Rohdaten schon herausgefiltert. */
+function jahrfreiKarte(){
+  const liste = (ARCHIV && ARCHIV.dateien || []).filter(d=>!dateiJahr(d) && !istRauschen(d));
+  const gruppen = new Map();
+  for(const d of liste){
+    const teile = String(d.p||"").split("/");
+    const g = (d.r||"") + (teile.length>1 ? " › "+teile[0] : "");
+    if(!gruppen.has(g)) gruppen.set(g, []);
+    gruppen.get(g).push(d);
+  }
+  const inhalt = [...gruppen.entries()].sort((a,b)=>a[0].localeCompare(b[0],"de")).map(([g,l])=>{
+    const zeilen = l.sort((a,b)=>String(a.p).localeCompare(String(b.p),"de")).map(d=>{
+      const unter = String(d.p||"").split("/").slice(1,-1);
+      return archivLinkZeile({ n:(unter.length ? unter.join(" / ")+" / " : "")+d.n, w:d.w, g:d.g });
+    }).join("");
+    return `<h4>📁 ${esc(g)} <span class="cnt">${l.length}</span></h4><ul class="doclist">${zeilen}</ul>`;
+  }).join("");
+  return `<section class="cat" style="--fach:var(--prodi)"><h3><span class="ic">♾️</span> Jahresunabhängig <span class="hint-sub">gilt für alle Schuljahre · Organisation, Rechnungen, Skripte</span><span class="cnt">${liste.length}</span></h3>`
+    + (inhalt || `<div class="cat-empty">Keine jahresunabhängigen Dateien.</div>`) + `</section>`;
+}
+/* Alle Dateien des Schuljahres aus New CdM/<Jahr> und CdM/<Jahr> (die Dashboard-Ordner stehen schon
+   in den Kurs-Karten) — gruppiert nach Wurzel und erstem Unterordner, zum Aufklappen. */
+function jahresDateienKarte(jahr){
+  const liste = (ARCHIV && ARCHIV.dateien || []).filter(d=>dateiJahr(d)===jahr && d.r!=="CdM-Dashboard");
+  if(!liste.length) return "";
+  const gruppen = new Map();
+  for(const d of liste){
+    let teile = String(d.p||"").split("/");
+    if(/^\d{4}-\d{4}$/.test(teile[0])) teile = teile.slice(1);          /* Jahresordner selbst weglassen */
+    const g = (d.r||"") + " › " + (teile.length>1 ? teile[0] : "(Hauptordner)");
+    if(!gruppen.has(g)) gruppen.set(g, []);
+    gruppen.get(g).push({ d, unter: teile.slice(1,-1) });
+  }
+  const inhalt = [...gruppen.entries()].sort((a,b)=>a[0].localeCompare(b[0],"de")).map(([g,l])=>{
+    const zeilen = l.sort((a,b)=>String(a.d.p).localeCompare(String(b.d.p),"de"))
+      .map(({d,unter})=>archivLinkZeile({ n:(unter.length ? unter.join(" / ")+" / " : "")+d.n, w:d.w, g:d.g })).join("");
+    return `<details class="gruppe"><summary>📁 ${esc(g)} <span class="cnt">${l.length.toLocaleString("de-DE")}</span></summary><ul class="doclist">${zeilen}</ul></details>`;
+  }).join("");
+  return `<section class="cat" style="--fach:var(--eltec)"><h3><span class="ic">🗃️</span> Dateien dieses Schuljahres in OneDrive
+    <span class="hint-sub">New CdM, CdM — zum Aufklappen</span><span class="cnt">${liste.length.toLocaleString("de-DE")}</span></h3>${inhalt}</section>`;
+}
+function renderArchiv(){
+  const jahr = state.archivJahr;
+  const J = (ARCHIV && ARCHIV.jahre && ARCHIV.jahre[jahr]) || {klassen:{}, organisation:[], verzeichnisse:[]};
+  const art = jahrArt(jahr), n = JAHR_ZAHL.get(jahr) || 0;
+  const kopf = `<div class="archiv-kopf"><h2 style="margin:0;font-size:18px">${art==="Archiv"?"🗄️":"📅"} Schuljahr ${esc(jahr.replace("-"," – "))} <span class="hint-sub">${esc(art)}</span></h2>
+    <span class="hinweis">nur Admin · alle Dateien öffnen in OneDrive (SharePoint) · aktiv im Portal ist ${esc((ARCHIV.aktiv||"").replace("-"," – "))} · ${esc(standText())}</span></div>`;
+  const karten = [...klassenKarten(J, false), organisationKarte(J), verzeichnisKarte(J), jahresDateienKarte(jahr), jahrfreiKarte()].filter(Boolean);
+  const leer = !n && !Object.keys(J.klassen||{}).length && !(J.organisation||[]).length;
+  $("#view").innerHTML = kopf
+    + (leer ? `<div class="empty-note" style="margin:0 0 16px">In diesem Schuljahr liegt noch keine Datei. Unten stehen die jahresunabhängigen Dateien; neue Dateien im Jahresordner erscheinen nach dem nächsten Veröffentlichen am Mac (dann ↻ Aktualisieren).</div>` : "")
+    + `<div class="archiv-grid">${karten.join("")}</div>` + renderSucheKarte(jahr);
   window.scrollTo(0,0);
+}
+/* Aktives Jahr, Admin: unter den Kacheln das, was nur in OneDrive liegt — Examen, Repêchage,
+   Organisation, Hauptverzeichnisse — plus die jahresunabhängigen Dateien. */
+function renderAktivOffline(){
+  if(!SESSION || SESSION.rolle!=="admin" || !ARCHIV) return "";
+  const J = (ARCHIV.jahre && ARCHIV.jahre[ARCHIV.aktiv]) || {klassen:{}, organisation:[], verzeichnisse:[]};
+  const karten = [...klassenKarten(J, true), organisationKarte(J), verzeichnisKarte(J), jahresDateienKarte(ARCHIV.aktiv), jahrfreiKarte()].filter(Boolean);
+  return `<div class="aktiv-offline"><h2>🗂️ Nur in OneDrive · Schuljahr ${esc(ARCHIV.aktiv.replace("-"," – "))} <span class="hint-sub">nur Admin · ${esc(standText())}</span></h2>
+    <div class="archiv-grid">${karten.join("")}</div></div>`;
+}
+/* Nach jedem Veröffentlichen am Mac bekommt der Admin-Schlüssel ein neues Salz (build.py) —
+   eine ältere Sitzung öffnet dann Archiv und Zugangsliste nicht mehr. Statt „ab- und neu
+   anmelden“: hier einmal das Passwort eingeben (es wird nicht gespeichert). */
+function brauchtEntsperren(){
+  /* Maßgeblich ist die Zugangsliste: sie liegt in index.json und passt immer zum aktuellen Salz.
+     Nur ein Portal ohne Zugangsliste fällt auf das Archiv zurück. */
+  if(!SESSION || SESSION.rolle!=="admin") return false;
+  return ZUGAENGE_STATUS==="fehler" || (ZUGAENGE_STATUS==="alt" && ARCHIV_STATUS==="fehler");
+}
+/* [Verwaltung] Passt der Admin-Schlüssel der Sitzung zu dieser index.json? Sonst würden
+   „Klasse anlegen“ & Co. Einträge unter einem veralteten Schlüssel schreiben. */
+async function adminKekPasst(idx){
+  if(!idx || !idx.zugaenge) return true;       /* Portal ohne Zugangsliste: nicht prüfbar */
+  try{ await entwickle(await adminKekKey(), idx.zugaenge); return true; }catch(e){ return false; }
+}
+const KEK_VERALTET = "Das Portal wurde inzwischen am Mac neu veröffentlicht — erst ↻ Aktualisieren und oben mit dem Admin-Passwort entsperren.";
+function renderEntsperrKarte(){
+  if(!brauchtEntsperren()) return "";
+  return `<section class="cat reauth" style="--fach:var(--warn)"><h3><span class="ic">🔑</span> Portal wurde neu veröffentlicht
+      <span class="hint-sub">Jahre, CdM-Suche und Zugänge einmal entsperren</span></h3>
+    <div class="admin-hilfe" style="padding:0 15px 8px">Seit deiner Anmeldung wurde das Portal am Mac neu gebaut; dabei bekommt der Admin-Schlüssel
+      jedes Mal ein neues Salz. Einmal das Admin-Passwort eingeben — die Kurse bleiben offen, das Passwort wird nicht gespeichert.</div>
+    <form id="reauthForm" autocomplete="on">
+      <input type="password" id="reauthPw" placeholder="Admin-Passwort" autocomplete="current-password" required aria-label="Admin-Passwort">
+      <button class="btn" type="submit" id="reauthBtn" style="background:var(--accent);color:#0a0f1a">Entsperren</button>
+    </form>
+    <div class="login-status" id="reauthStatus"></div></section>`;
 }
 
 /* Zeitraum je Klasse: DP-Klassen = 2 Semester, GIG/GSO = 3 Trimester */
@@ -864,10 +1160,10 @@ function renderHome(){
       <div class="go">Öffnen →</div>
     </button>`;
   }).join("");
-  $("#view").innerHTML = renderZugangsKarte() + (tiles
+  $("#view").innerHTML = renderEntsperrKarte() + renderZugangsKarte() + (tiles
     ? `<div class="grid">${tiles}</div>`
     : `<div class="empty-note">Für diese Klasse sind noch keine Fächer hinterlegt.</div>`)
-    + renderSucheKarte("") + renderAdminKarte();
+    + renderAktivOffline() + renderSucheKarte("") + renderAdminKarte();
   if(SESSION && SESSION.rolle==="admin"){
     if($("#nkFaecher") && !$("#nkFaecher").children.length) nkFaecherNeu();
     befuelleAdminSelects();
@@ -901,7 +1197,7 @@ function renderAdminKarte(){
         autocomplete="off" value="${esc(tokenLesen())}" aria-label="GitHub-Token">
       <span class="tok-hilfe"><a href="https://github.com/settings/personal-access-tokens/new"
         target="_blank" rel="noopener">Token anlegen</a> → Only select repositories →
-        <code>schuljahr-portal</code>, Permission <i>Contents: Read and write</i>.</span>
+        <code>CdM</code>, Permission <i>Contents: Read and write</i>.</span>
     </div>
 
     <div class="admin-block">
@@ -1163,6 +1459,7 @@ async function adminNeuerProf(){
   const status = $("#npStatus"), knopf = $("#npStart"), ausgabe = $("#npAusgabe");
   const setze = t => { status.textContent = t; };
   if(!SESSION || SESSION.rolle!=="admin"){ setze("Nur der Admin darf Zugänge anlegen."); return; }
+  if(brauchtEntsperren()){ setze(KEK_VERALTET); return; }
   const name = $("#npName").value.trim();
   const token = $("#upToken").value.trim();
   if(!name){ setze("Bitte einen Namen eintragen."); return; }
@@ -1173,6 +1470,7 @@ async function adminNeuerProf(){
     setze("Lade index.json von GitHub …");
     const idxAntwort = await ghAPI("contents/docs/vaults/index.json?ref=main", {}, token);
     const idx = JSON.parse(new TextDecoder().decode(b64zu(idxAntwort.content.replace(/\s/g,""))));
+    if(!(await adminKekPasst(idx))){ setze(KEK_VERALTET); knopf.disabled = false; return; }
 
     // eindeutige Principal-ID (kollidiert nicht mit build.py-IDs p0..pN)
     const vorhanden = new Set(idx.principals.map(p=>p.id));
@@ -1213,6 +1511,7 @@ async function adminNeuerProf(){
       content: b64ausBytes(new TextEncoder().encode(JSON.stringify(idx, null, 1)))})}, token);
 
     INDEX = idx;   // lokale Anzeige aktualisieren (Zähler)
+    WEB_GESCHRIEBEN = Date.now();
     setze("");
     ausgabe.innerHTML = `<div class="np-erfolg">✅ <b>${esc(name)}</b> angelegt — Login in 1–2 min aktiv.
       <div class="np-pw">Passwort: <code>${esc(passwort)}</code></div>
@@ -1316,6 +1615,7 @@ async function adminNeueKlasse(){
   const status = $("#nkStatus"), knopf = $("#nkStart"), ausgabe = $("#nkAusgabe");
   const setze = t => { status.textContent = t; };
   if(!SESSION || SESSION.rolle!=="admin"){ setze("Nur der Admin darf Klassen anlegen."); return; }
+  if(brauchtEntsperren()){ setze(KEK_VERALTET); return; }
   const token = $("#upToken").value.trim();
   if(!token){ setze("Bitte oben das GitHub-Token eintragen."); return; }
   const kuerzel = $("#nkKuerzel").value.trim();
@@ -1356,6 +1656,7 @@ async function adminNeueKlasse(){
     setze("Lade index.json von GitHub …");
     const idxAntwort = await ghAPI("contents/docs/vaults/index.json?ref=main", {}, token);
     const idx = JSON.parse(new TextDecoder().decode(b64zu(idxAntwort.content.replace(/\s/g,""))));
+    if(!(await adminKekPasst(idx))){ setze(KEK_VERALTET); knopf.disabled = false; return; }
 
     const vorhanden = new Set(idx.principals.map(pr=>pr.id));
     let pid; do { pid = "pw" + zufallsHex(4); } while(vorhanden.has(pid));
@@ -1418,7 +1719,7 @@ async function adminNeueKlasse(){
       message:`Portal: neue Klasse ${kuerzel}`, branch:"main", sha: idxAntwort.sha,
       content: b64ausBytes(new TextEncoder().encode(JSON.stringify(idx, null, 1)))})}, token);
 
-    INDEX = idx;
+    INDEX = idx; WEB_GESCHRIEBEN = Date.now();
     for(const v of neueVaults) SESSION.vaults.push({ id:v.id, k:v.k, manifest:v.manifest });
     sessionSpeichern(SESSION);
     const kl = DATEN.klassen[kuerzel] = { key:kuerzel, name, faecher:faecherMitKeys,
@@ -1447,6 +1748,7 @@ async function adminPasswortNeu(){
   const status = $("#pwStatus"), knopf = $("#pwStart"), ausgabe = $("#pwAusgabe");
   const setze = t => { status.textContent = t; };
   if(!SESSION || SESSION.rolle!=="admin"){ setze("Nur der Admin darf Passwörter ändern."); return; }
+  if(brauchtEntsperren()){ setze(KEK_VERALTET); return; }
   const token = $("#upToken").value.trim();
   if(!token){ setze("Bitte oben das GitHub-Token eintragen."); return; }
   const ziel = $("#pwWer").value;
@@ -1458,6 +1760,7 @@ async function adminPasswortNeu(){
     setze("Lade index.json …");
     const idxAntwort = await ghAPI("contents/docs/vaults/index.json?ref=main", {}, token);
     const idx = JSON.parse(new TextDecoder().decode(b64zu(idxAntwort.content.replace(/\s/g,""))));
+    if(!(await adminKekPasst(idx))){ setze(KEK_VERALTET); knopf.disabled = false; return; }
     const meineKeys = new Map(SESSION.vaults.map(v=>[v.id, v.k]));
 
     let label, passwort, selbstNeuRoh = null;
@@ -1525,7 +1828,7 @@ async function adminPasswortNeu(){
     await ghAPI("contents/docs/vaults/index.json", {method:"PUT", body: JSON.stringify({
       message:`Portal: Passwort rotiert`, branch:"main", sha: idxAntwort.sha,
       content: b64ausBytes(new TextEncoder().encode(JSON.stringify(idx, null, 1)))})}, token);
-    INDEX = idx;
+    INDEX = idx; WEB_GESCHRIEBEN = Date.now();
     if(selbstNeuRoh){ SESSION.kek = b64ausBytes(selbstNeuRoh); sessionSpeichern(SESSION); }
     await ladeZugaenge();            /* Karte + Beamer zeigen sofort das neue PW */
     zugangsKarteAktualisieren();
@@ -1546,6 +1849,7 @@ async function adminZugangEntfernen(){
   const status = $("#entfStatus"), knopf = $("#entfStart");
   const setze = t => { status.textContent = t; };
   if(!SESSION || SESSION.rolle!=="admin"){ setze("Nur der Admin darf Zugänge entfernen."); return; }
+  if(brauchtEntsperren()){ setze(KEK_VERALTET); return; }
   const token = $("#upToken").value.trim();
   if(!token){ setze("Bitte oben das GitHub-Token eintragen."); return; }
   const ziel = $("#entfWer").value;
@@ -1555,6 +1859,7 @@ async function adminZugangEntfernen(){
     const adminKek = await adminKekKey();
     const idxAntwort = await ghAPI("contents/docs/vaults/index.json?ref=main", {}, token);
     const idx = JSON.parse(new TextDecoder().decode(b64zu(idxAntwort.content.replace(/\s/g,""))));
+    if(!(await adminKekPasst(idx))){ setze(KEK_VERALTET); knopf.disabled = false; return; }
     if(!(idx.kekw||{})[ziel]){ setze("Zugang nicht gefunden."); knopf.disabled=false; return; }
     const meta = await entwickle(adminKek, idx.kekw[ziel]);
     const istKlasse = meta.rolle === "schueler";
@@ -1598,7 +1903,7 @@ async function adminZugangEntfernen(){
     await ghAPI("contents/docs/vaults/index.json", {method:"PUT", body: JSON.stringify({
       message:`Portal: Zugang entfernt`, branch:"main", sha: idxAntwort.sha,
       content: b64ausBytes(new TextEncoder().encode(JSON.stringify(idx, null, 1)))})}, token);
-    INDEX = idx; sessionSpeichern(SESSION);
+    INDEX = idx; WEB_GESCHRIEBEN = Date.now(); sessionSpeichern(SESSION);
     setze("");
     toast(`✅ ${istKlasse ? "Klasse "+meta.klasse : meta.label} entfernt — in 1–2 min wirksam.`);
     await starteOberflaeche();
@@ -1760,6 +2065,7 @@ async function holeBlobURL(vaultId, dateiId, typ){
   if(!v) throw new Error("kein Zugriff");
   let key = vaultKeyCache.get(v.id);
   if(!key){ key = await importiereVaultKey(v.k); vaultKeyCache.set(v.id, key); }
+  /* Geänderter Inhalt bekommt beim Build eine neue ID (build.py) — deshalb darf der Browser jede ID dauerhaft zwischenspeichern */
   const r = await fetch(`vaults/${vaultId}/f/${dateiId}.enc`, {cache:"force-cache"});
   if(!r.ok) throw new Error("laden");
   const klar = await entschluesseleBlock(key, await r.arrayBuffer());
@@ -2020,7 +2326,7 @@ function renderZugangsKarte(){
   const liste = zgListe();
   if(!liste.length){
     const text = ZUGAENGE_STATUS === "fehler"
-      ? "Die Zugangsliste ließ sich nicht entschlüsseln — bitte einmal abmelden und neu anmelden."
+      ? "Die Zugangsliste ließ sich nicht entschlüsseln — oben einmal mit dem Admin-Passwort entsperren."
       : ZUGAENGE_STATUS === "alt"
       ? "Dieses Portal wurde noch ohne Zugangsliste veröffentlicht. Portal einmal neu veröffentlichen (build.py, dann veroeffentlichen.py) — danach stehen die Passwörter hier."
       : "Es sind keine Kurs-Zugänge hinterlegt.";
@@ -2202,6 +2508,7 @@ $("#proj").addEventListener("click", ev=>{
 /* ═══════════════════════════ Navigation & Kopf ══════════════════════════ */
 $("#view").addEventListener("click", e=>{
   if(e.target.closest("#upStart")){ adminUpload(); return; }
+  if(e.target.closest("#sucheMehr")){ state.sucheMax += 150; const box=$("#cdmSucheErgebnis"); if(box) box.innerHTML = sucheErgebnisHtml(box.dataset.jahr||""); return; }
   const zgP = e.target.closest(".zg-proj");
   if(zgP){ projOeffnen(zgP.dataset.i); return; }
   const zgK = e.target.closest(".zg-kopie");
@@ -2228,14 +2535,14 @@ $("#view").addEventListener("change", e=>{
 $("#archivSelect").addEventListener("change", e=>{
   const j = e.target.value;
   state.archivJahr = (ARCHIV && j===ARCHIV.aktiv) ? null : j;
-  state.view="home"; state.modul=null;
-  $("#h-jahr").textContent = state.archivJahr ? j.replace("-"," – ")+" · Archiv" : (INDEX.schuljahr||"–");
+  state.view="home"; state.modul=null; state.sucheMax = 150;
+  kopfJahr();
   render();
 });
 let sucheTimer = null;
 $("#view").addEventListener("input", e=>{
   if(e.target.id!=="cdmSucheFeld") return;
-  state.sucheQ = e.target.value;
+  state.sucheQ = e.target.value; state.sucheMax = 150;
   clearTimeout(sucheTimer);
   sucheTimer = setTimeout(()=>{ const box=$("#cdmSucheErgebnis"); if(box) box.innerHTML = sucheErgebnisHtml(box.dataset.jahr||""); }, 120);
 });
@@ -2244,6 +2551,7 @@ $("#view").addEventListener("change", e=>{
   else if(e.target.id==="cdmSucheArt") state.sucheArt = e.target.value;
   else if(e.target.id==="cdmSucheModul") state.sucheModul = e.target.value;
   else return;
+  state.sucheMax = 150;
   const box=$("#cdmSucheErgebnis"); if(box) box.innerHTML = sucheErgebnisHtml(box.dataset.jahr||"");
   if(e.target.id==="cdmSucheJahr"){ ["cdmSucheArt","cdmSucheModul"].forEach(id=>{ const s=$("#"+id); if(s) s.innerHTML = sucheOptionen(id==="cdmSucheArt"?"a":"m", id==="cdmSucheArt"?state.sucheArt:state.sucheModul, id==="cdmSucheArt"?"Alle Arten":"Alle Module", state.sucheJahr); }); }
 });
@@ -2264,6 +2572,30 @@ $("#seg").addEventListener("click", e=>{
 });
 markSeg();
 $("#logoutBtn").addEventListener("click", abmelden);
+$("#refreshBtn").addEventListener("click", aktualisieren);
+$("#view").addEventListener("submit", async e=>{
+  if(e.target.id!=="reauthForm") return;
+  e.preventDefault();
+  const feld = $("#reauthPw"), status = $("#reauthStatus"), btn = $("#reauthBtn");
+  const pw = feld.value;
+  if(!pw) return;
+  btn.disabled = true; status.classList.remove("fehler");
+  status.textContent = "Prüfe — Schlüssel wird abgeleitet …";
+  try{
+    await holeIndexFrisch();                 /* neueste Salze und neuestes Archiv */
+    const s = await pruefePasswort(pw);
+    feld.value = "";
+    if(!s || s.rolle!=="admin"){
+      status.classList.add("fehler"); status.textContent = "Das ist nicht das Admin-Passwort.";
+      btn.disabled = false; feld.focus(); return;
+    }
+    status.textContent = "Entschlüssele …";
+    await adminSitzungErneuern(s);
+  }catch(err){
+    status.classList.add("fehler"); status.textContent = "Fehler beim Laden — bitte Verbindung prüfen und neu versuchen.";
+    btn.disabled = false;
+  }
+});
 
 /* ---------- Hell/Dunkel ---------- */
 const SUN  = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.3"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
