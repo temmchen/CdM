@@ -53,6 +53,29 @@ BUILD_STATE = HIER / ".build-state.json"   # GEHEIM (gitignored): Vault-Schlüss
 
 PBKDF2_ITER = 600_000
 
+
+# ─────────────────────────── Unicode-Angleichung ────────────────────────────
+# Der zweite Mac liefert Dateinamen mit Akzenten (é, ü, …) aus OneDrive ZERLEGT (NFD: „e“ + Akzent),
+# dieser Mac ZUSAMMENGESETZT (NFC): gleicher Name, andere Bytes. Ohne Angleichung sah jeder Mac die
+# Akzent-Dateien des anderen als „neu“, verschlüsselte sie neu und wollte das committen – 06.–07.10.2026
+# waren das 6 nutzlose Commits mit 132 MB Chiffrat, die nie bei GitHub ankamen. Darum: ALLE Schlüssel,
+# Anzeigenamen und Archiv-Texte in NFC. (APFS findet die Datei unabhängig von der Form; nur unsere
+# Vergleiche brauchen eine feste Form.)
+
+def nfc(text: str) -> str:
+    return unicodedata.normalize("NFC", text)
+
+
+def nfc_tief(obj):
+    """NFC für alle Zeichenketten in verschachtelten dict/list (auch Schlüssel)."""
+    if isinstance(obj, str):
+        return nfc(obj)
+    if isinstance(obj, list):
+        return [nfc_tief(x) for x in obj]
+    if isinstance(obj, dict):
+        return {nfc_tief(k): nfc_tief(v) for k, v in obj.items()}
+    return obj
+
 # Bereiche wie im bisherigen Schuljahr-Dashboard (Ordnernamen identisch).
 # OHNE "Noten": beim CdM gibt es keinen Noten-Bereich (Bewertung über die Plattform);
 # ein trotzdem vorhandener Ordner Noten/ wird nie hochgeladen (Sicherheitsnetz).
@@ -118,7 +141,7 @@ def wickle_ein(kek: bytes, nutzlast: dict) -> dict:
 # ─────────────────────────── Inhalte einsammeln ─────────────────────────────
 
 def anzeige_name(pfad: Path) -> str:
-    return pfad.stem.replace("_", " ").strip()
+    return nfc(pfad.stem.replace("_", " ").strip())
 
 
 def sammle_dateien(ordner: Path):
@@ -171,11 +194,11 @@ def archiv_daten(dashboard: Path, aktiv: str):
     def portal_ok(f: Path) -> bool:
         """Dieselben Ausschlüsse wie die CdM-Suche (suche_index.portal_ausgeschlossen): Bewertungen,
         Ergebnisse, Passwortlisten, JSON-Rohdaten — auch als Link nie ins Portal."""
-        rel = str(f.relative_to(dashboard))
+        rel = nfc(str(f.relative_to(dashboard)))
         ext = f.suffix.lstrip(".")
-        art = si.art_aus(f.name, rel, ext)
+        art = si.art_aus(nfc(f.name), rel, ext)
         if hasattr(si, "portal_ausgeschlossen"):
-            return not si.portal_ausgeschlossen(f.name, rel, ext, art, cfg)
+            return not si.portal_ausgeschlossen(nfc(f.name), rel, ext, art, cfg)
         return art != "Bewertung"          # älteres suche_index.py
 
     def datei(f: Path) -> dict:
@@ -236,8 +259,9 @@ def archiv_daten(dashboard: Path, aktiv: str):
         jahre[jd.name] = eintrag
 
     dateien = si.export_portal(cfg)
-    return {"v": 1, "stand": datetime.now().isoformat(timespec="minutes"), "aktiv": aktiv, "onedrive": cfg.get("od_web", ""),
-            "jahre": jahre, "dateien": dateien}
+    # nfc_tief: Fingerabdruck und Archiv auf beiden Macs byte-gleich (Akzente, siehe nfc())
+    return nfc_tief({"v": 1, "stand": datetime.now().isoformat(timespec="minutes"), "aktiv": aktiv, "onedrive": cfg.get("od_web", ""),
+                     "jahre": jahre, "dateien": dateien})
 
 
 def _fingerprint(daten: dict) -> str:
@@ -501,7 +525,7 @@ def main():
                 for e in eintraege:
                     quelle = Path(e.pop("_pfad"))
                     st = quelle.stat()
-                    dschluessel = f"{vschluessel}|{quelle}"
+                    dschluessel = nfc(f"{vschluessel}|{quelle}")      # NFC: siehe nfc() oben
                     vorher_d = alt_state["dateien"].get(dschluessel)
                     unveraendert = (vorher_d
                                     and vorher_d["size"] == st.st_size
