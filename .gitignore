@@ -1,0 +1,17 @@
+# GEHEIM — Passwörter niemals committen!
+zugangsdaten.json
+
+# lokales Gedächtnis des Ein-Klick-Veröffentlichers
+.letzter-stand.json
+
+# macOS
+.DS_Store
+
+# GEHEIM — Tresor-Schlüssel des inkrementellen Builds
+.build-state.json
+
+# Sicherungskopien neben den Dateien (Konvention *.bak-JJJJMMTT)
+*.bak-*
+
+# Python-Zwischenspeicher
+__pycache__/

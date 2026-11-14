@@ -1,0 +1,518 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+veroeffentlichen.py — Ein-Klick-Veröffentlichung fürs Schuljahr-Portal
+=======================================================================
+
+Gedacht für den Doppelklick auf „Portal veröffentlichen.command" im
+OneDrive-Dashboard-Ordner. Prüft alles und erledigt dann alles:
+
+  1. holt den GitHub-Stand ab und ERKENNT Browser-Aktionen (Uploads,
+     neue Kollegen) — die müssen erst in OneDrive bzw. zugangsdaten.json
+     übernommen sein, sonst wird NICHT gebaut (sie gingen sonst verloren)
+  2. erkennt NEUE Klassen-Ordner in OneDrive → fragt, ob die Klasse
+     angelegt werden soll (Fächer werden aus den Modul-Ordnern abgeleitet)
+  2c. prüft das Admin-Archiv (Jahrgangs-Links + CdM-Suchindex): ändert sich in den
+      CdM-Ordnern etwas, wird auch ohne Änderung in den Online-Bereichen neu gebaut
+  3. warnt bei Stolperfallen: Ordnernamen mit Leerzeichen, unbekannte
+     Modul-Ordner, Dateien in Unterordnern oder direkt im Modulordner
+  4. zeigt, was sich seit der letzten Veröffentlichung geändert hat
+  5. baut, committet, pusht — nur wenn es wirklich etwas zu tun gibt
+  6. (CdM: kein Notendashboard — ein alter Noten-Ordner wird nur gemeldet, nie hochgeladen)
+
+Ohne Änderungen passiert nichts.
+"""
+
+import json
+import re
+import subprocess
+import sys
+import unicodedata
+from pathlib import Path
+
+HIER = Path(__file__).resolve().parent
+KONFIG = HIER / "zugangsdaten.json"
+STAND = HIER / ".letzter-stand.json"          # lokales Gedächtnis (gitignored)
+
+# Seit 01.11.2026 geht NUR „Skripte" auf GitHub; die übrigen Bereichsordner bleiben lokal.
+BEREICHE_ONLINE = ["Skripte"]
+BEREICHE_LOKAL = ["Pruefungen", "Aufgaben", "Sonstiges", "Referentiels", "Examen", "Repechage"]
+# CdM: kein Bereich „Noten" — die Chambre des Métiers bewertet über ihre Plattform. Ein alter
+# Noten-Ordner würde weiterhin erkannt und NIE hochgeladen, aber es gibt kein Notendashboard.
+ALLE_BEREICHE = BEREICHE_ONLINE + BEREICHE_LOKAL + ["Noten"]
+AKZENTE = ["eltec", "mint", "prodi"]
+
+sys.path.insert(0, str(HIER))
+import verwaltung                              # neues_passwort(), speichere()
+
+
+def archiv_stand(dashboard, jahr):
+    """→ (Fingerabdruck, "") des Admin-Archivs (Jahrgangs-Links + CdM-Suchindex) oder (None, Grund).
+    build.py wird erst HIER geladen (bzw. neu geladen) — also nach dem git pull. Sonst rechnete der
+    zweite Mac nach einem Code-Update einmal mit dem alten build.py und baute unnötig neu."""
+    try:
+        import importlib
+        import build
+        archiv_fingerprint = importlib.reload(build).archiv_fingerprint
+    except (Exception, SystemExit):            # build.py fehlt/kaputt/ohne cryptography → Prüfung entfällt
+        return None, "build.py nicht ladbar (Paket cryptography?)"
+    try:
+        return archiv_fingerprint(dashboard, jahr)
+    except Exception as ex:
+        return None, str(ex)
+
+
+# ───────────────────────── Schuljahr ────────────────────────────────────────
+# EINE Quelle der Wahrheit: <Dashboard>/aktuelles-jahr.txt (z. B. "2026-2027").
+# Veröffentlicht wird immer nur dieses Jahr — ältere Jahrgänge bleiben in
+# OneDrive liegen und halten das Portal klein.
+
+def jahr_von(dashboard) -> str:
+    from pathlib import Path as _P
+    marke = _P(dashboard) / "aktuelles-jahr.txt"
+    try:
+        j = marke.read_text(encoding="utf-8").strip()
+        if j:
+            return j
+    except Exception:
+        pass
+    jahre = sorted(p.name for p in _P(dashboard).iterdir()
+                   if p.is_dir() and len(p.name) == 9 and p.name[4] == "-" and p.name[:4].isdigit())
+    return jahre[-1] if jahre else "2026-2027"
+
+
+def jahr_anzeige(j: str) -> str:
+    return j.replace("-", " – ")
+
+
+def sag(text=""):
+    print(text, flush=True)
+
+
+def git(*args, fehler_ok=False):
+    r = subprocess.run(["git", "-C", str(HIER)] + list(args),
+                       capture_output=True, text=True)
+    if r.returncode != 0 and not fehler_ok:
+        sag(f"❌ git {' '.join(args)} fehlgeschlagen:\n{r.stderr.strip()}")
+        sys.exit(1)
+    return r
+
+
+# ─────────────────────── Scan-Helfer ────────────────────────────────────────
+
+def dateien_in(ordner: Path):
+    if not ordner.is_dir():
+        return []
+    return [p for p in sorted(ordner.iterdir(), key=lambda p: p.name.lower())
+            if p.is_file() and not p.name.startswith(".")]
+
+
+def modul_keys(kl):
+    keys = []
+    for f in kl.get("faecher", []):
+        for name in f.get("modul", {}).values():
+            keys.append(name.replace(" ", ""))
+    return keys
+
+
+def inventar(cfg, inhalt: Path):
+    """Online-relevante Dateien + Noten-Dateien getrennt erfassen."""
+    online, noten, warnungen = {}, {}, []
+    for kl in cfg.get("klassen", []):
+        basis = inhalt / kl["key"]
+        if not basis.is_dir():
+            continue
+        mks = set(modul_keys(kl))
+        for unter in sorted(p for p in basis.iterdir()
+                            if p.is_dir() and not p.name.startswith(".")):
+            if unter.name not in mks:
+                warnungen.append(f"{kl['key']}/{unter.name}/: Modul-Ordner ohne "
+                                 f"Fächer-Eintrag — wird NICHT hochgeladen "
+                                 f"(Fach in zugangsdaten.json ergänzen"
+                                 + (" — Achtung, Ordnername enthält Leerzeichen, "
+                                    "bitte ohne Leerzeichen benennen" if " " in unter.name else "")
+                                 + ")")
+        for mk in sorted(mks):
+            mdir = basis / mk
+            if not mdir.is_dir():
+                continue
+            lose = dateien_in(mdir)
+            if lose:
+                warnungen.append(f"{kl['key']}/{mk}/: {len(lose)} Datei(en) liegen "
+                                 f"direkt im Modulordner — bitte in einen "
+                                 f"Bereichsordner ({', '.join(BEREICHE_ONLINE + BEREICHE_LOKAL)}) legen")
+            for bereich in BEREICHE_ONLINE + ["Noten"]:     # lokale Bereiche zählen nicht als „online"
+                bdir = mdir / bereich
+                if not bdir.is_dir():
+                    continue
+                ziel = noten if bereich == "Noten" else online
+                for p in dateien_in(bdir):
+                    st = p.stat()
+                    # NFC: der zweite Mac liefert Akzent-Namen zerlegt (NFD) – gleicher Name, andere
+                    # Bytes; ohne Angleichung gälten die Dateien dort als neu (siehe build.py nfc()).
+                    schluessel = unicodedata.normalize("NFC", f"{kl['key']}/{mk}/{bereich}/{p.name}")
+                    ziel[schluessel] = [st.st_size, int(st.st_mtime)]
+                vergraben = [u for u in bdir.iterdir()
+                             if u.is_dir() and not u.name.startswith(".")
+                             and any(x.is_file() and not x.name.startswith(".")
+                                     for x in u.rglob("*"))]
+                if vergraben and bereich != "Noten":
+                    warnungen.append(f"{kl['key']}/{mk}/{bereich}/: Dateien in "
+                                     f"Unterordnern ({', '.join(u.name for u in vergraben)}) "
+                                     f"werden NICHT hochgeladen — bitte direkt in den "
+                                     f"Bereichsordner legen")
+    return online, noten, warnungen
+
+
+def klassen_kandidaten(cfg, inhalt: Path):
+    """Ordner, die wie eine neue Klasse aussehen (Module mit Bereichsordnern)."""
+    bekannt = {kl["key"].lower() for kl in cfg.get("klassen", [])}
+    kandidaten = []
+    for d in sorted(p for p in inhalt.iterdir()
+                    if p.is_dir() and not p.name.startswith(".")):
+        if d.name.lower() in bekannt:
+            continue
+        module = [m for m in d.iterdir() if m.is_dir() and not m.name.startswith(".")
+                  and any((m / b).is_dir() for b in ALLE_BEREICHE)]
+        if module:
+            kandidaten.append((d, sorted(module, key=lambda m: m.name)))
+    return kandidaten
+
+
+def leite_faecher_ab(module):
+    """Aus Modul-Ordnernamen Fächer ableiten: MINT1+MINT2 → Fach MINT, Sem 1/2.
+
+    WICHTIG: build.py adressiert den Ordner über modulname.replace(" ","") —
+    Ordnernamen MIT Leerzeichen können daher nie gelesen werden und werden
+    als 'problematisch' zurückgegeben (User soll umbenennen)."""
+    problematisch = [m.name for m in module if " " in m.name]
+    module = [m for m in module if " " not in m.name]
+    gruppen = {}
+    for m in module:
+        t = re.match(r"^(.*?)(\d+)$", m.name)
+        stamm, nr = (t.group(1), int(t.group(2))) if t else (m.name, None)
+        gruppen.setdefault(stamm or m.name, []).append((nr, m.name))
+    faecher, uebrig = [], []
+    for i, (stamm, eintraege) in enumerate(sorted(gruppen.items())):
+        eintraege.sort(key=lambda e: (e[0] is None, e[0]))
+        modul = {}
+        for sem, (nr, ordner) in enumerate(eintraege[:2], start=1):
+            # Anzeigename: Leerzeichen vor der Zahl (MINT1 → "MINT 1"); die
+            # Invariante anzeigename.replace(" ","") == ordnername wird geprüft.
+            name = re.sub(r"\s+", " ", re.sub(r"^(.*?)(\d+)$", r"\1 \2", ordner)).strip()
+            if name.replace(" ", "") != ordner:
+                name = ordner
+            modul[str(sem)] = name
+        uebrig += [ordner for _nr, ordner in eintraege[2:]]
+        faecher.append({"key": stamm.upper().strip() or "FACH",
+                        "name": stamm.strip() or "Fach",
+                        "accent": AKZENTE[i % len(AKZENTE)], "modul": modul})
+    return faecher, uebrig, problematisch
+
+
+def frage(text):
+    try:
+        return input(text).strip().lower()
+    except EOFError:
+        return ""
+
+
+# ─────────────────────── Hauptablauf ────────────────────────────────────────
+
+def main():
+    sag("🔐 CdM-Portal — Prüfen & Veröffentlichen")
+    sag("=" * 46)
+    if not KONFIG.is_file():
+        sys.exit("zugangsdaten.json fehlt im Portal-Ordner.")
+    cfg = json.loads(KONFIG.read_text(encoding="utf-8"))
+    dashboard = Path(cfg["inhalt"]).expanduser()
+    jahr = jahr_von(dashboard)
+    inhalt = dashboard / jahr
+
+    # --pruefen: NUR nachsehen, nichts verändern (für den Portal-Wächter).
+    # Bewusst vor Pull/Sync/Einsammeln — dieser Modus fasst nichts an.
+    if "--pruefen" in sys.argv:
+        gespeichert = {}
+        if STAND.exists():
+            try:
+                gespeichert = json.loads(STAND.read_text(encoding="utf-8"))
+            except Exception:
+                gespeichert = {}
+        alt = gespeichert.get("online", {})
+        jetzt_online, _n, _w = inventar(cfg, inhalt)
+        # Archiv/CdM-Suche: neue Dateien in den CdM-Ordnern zählen ebenfalls als „offen"
+        fp_neu, fp_grund = archiv_stand(dashboard, jahr)
+        archiv_offen = fp_neu is not None and fp_neu != gespeichert.get("archiv")
+        if fp_neu is None and (dashboard / "suche_index.py").is_file():
+            # Nicht prüfbar zählt als OFFEN: der Wächter versucht dann zu veröffentlichen, der
+            # Lauf bricht mit klarer Meldung ab, und Tom bekommt eine Mitteilung — statt Stille.
+            print(f"WARNUNG Archiv/CdM-Suche nicht prüfbar: {fp_grund}", file=sys.stderr)
+            archiv_offen = True
+        # Neue oder geänderte LaTeX-Skripte, die der Sync noch nicht geholt hat (Trockenlauf, ändert nichts)
+        sync_offen = False
+        sync_skript = dashboard / "sync_inhalte.py"
+        if sync_skript.exists():
+            r = subprocess.run([sys.executable, str(sync_skript), "--trocken"], cwd=str(dashboard),
+                               capture_output=True, text=True)
+            m = re.search(r"Neu/aktualisiert:\s*(\d+)", r.stdout or "")
+            sync_offen = bool(m and int(m.group(1)) > 0)
+        git("fetch", "--quiet", "origin", "main", fehler_ok=True)
+        voraus = git("rev-list", "--count", "HEAD..origin/main",
+                     fehler_ok=True).stdout.strip() or "0"
+        if jetzt_online == alt and voraus == "0" and not archiv_offen and not sync_offen:
+            print("NICHTS-ZU-TUN")
+        else:
+            print("OFFEN")
+        return
+
+    if not inhalt.is_dir():
+        sys.exit(f"Inhalts-Ordner nicht gefunden: {inhalt}")
+
+    stand_alt = {}
+    if STAND.is_file():
+        try:
+            stand_alt = json.loads(STAND.read_text(encoding="utf-8"))
+        except Exception:
+            stand_alt = {}
+
+    # 1) GitHub-Stand holen + Browser-Aktionen erkennen (Uploads, neue Kollegen)
+    sag("\n① Hole aktuellen Stand von GitHub …")
+    alter_head = git("rev-parse", "HEAD").stdout.strip()
+    # Seit 01.11.2026 ist die GitHub-Historie bereinigt (nur Skripte). Eine ältere Kopie mit den
+    # entfernten Archiv-Commits darf NICHT gepullt werden – der Merge brächte sie zurück auf GitHub.
+    git("fetch", "--quiet", "origin", "main", fehler_ok=True)
+    if git("merge-base", "--is-ancestor", "HEAD", "origin/main", fehler_ok=True).returncode != 0 and \
+       git("merge-base", "--is-ancestor", "origin/main", "HEAD", fehler_ok=True).returncode != 0 and \
+       git("log", "--format=%h", "origin/main..HEAD", "--", "docs/vaults/archiv.enc", fehler_ok=True).stdout.strip():
+        sag("❌ Diese Kopie enthält noch die alte Historie (vor der Bereinigung am 01.11.2026).\n"
+            "   Erst angleichen:  python3 \"$HOME/Library/CloudStorage/OneDrive-365education/KI/"
+            "en cours de travail études/_Portal-Setup/historie_angleichen.py\" ~/Documents/CdM-Portal\n"
+            "   (der Portal-Wächter macht das automatisch). Nichts veröffentlicht.")
+        sys.exit(1)
+    pull = git("pull", "--no-rebase", "--quiet", "origin", "main", fehler_ok=True)
+    if pull.returncode != 0:
+        sag(f"❌ git pull fehlgeschlagen — bitte zuerst am Mac aufräumen:\n"
+            f"{pull.stderr.strip()}")
+        sys.exit(1)
+    neue_commits = git("log", "--pretty=%s", f"{alter_head}..HEAD",
+                       fehler_ok=True).stdout.splitlines()
+    browser_aktionen = sorted(set(stand_alt.get("browser_aktionen", []))
+                              | {z for z in neue_commits
+                                 if z.startswith("Portal-Upload") or z.startswith("Portal:")})
+
+    # 1b) Browser-Uploads einsammeln — Dateien, die es nur im Portal gibt, nach
+    #     OneDrive holen. Danach sind beide Wege gleichwertig: der Build kann
+    #     sie nicht mehr überschreiben, weil sie jetzt ganz normal in OneDrive
+    #     liegen. (Bewusst gelöschte Dateien werden NICHT zurückgeholt.)
+    sammler = HIER / "web_einsammeln.py"
+    uploads_uebernommen = False
+    if sammler.exists():
+        sag("\n①b Browser-Uploads einsammeln …")
+        r = subprocess.run([sys.executable, str(sammler)], capture_output=True, text=True)
+        for zeile in (r.stdout or "").splitlines():
+            if zeile.strip():
+                sag("   " + zeile)
+        if r.returncode == 0:
+            uploads_uebernommen = True
+        else:
+            sag((r.stderr or "").strip())
+            sag("   ⚠️  Einsammeln unvollständig — Uploads bitte von Hand nach OneDrive legen.")
+
+    if uploads_uebernommen:      # Uploads sind erledigt; andere Portal-Aktionen bleiben offen
+        browser_aktionen = [z for z in browser_aktionen if not z.startswith("Portal-Upload")]
+
+    if browser_aktionen:
+        sag("\n⚠️  Es gibt Browser-Aktionen, die der Mac-Build ÜBERSCHREIBEN würde:")
+        for z in browser_aktionen:
+            sag(f"     · {z}")
+        sag("   (Datei-Uploads werden automatisch eingesammelt — hier geht es um den Rest:)")
+        sag("   → neue Kollegen / Klassen zuerst in zugangsdaten.json eintragen")
+        sag("     (Snippet zeigt das Portal an), Passwort-Rotationen dort nachziehen.")
+        antwort = frage("   Ist das alles übernommen? Sonst geht es verloren! [j/N] ")
+        if antwort != "j":
+            stand_alt["browser_aktionen"] = browser_aktionen
+            STAND.write_text(json.dumps(stand_alt), encoding="utf-8")
+            sag("\n🛑 Abgebrochen — es wurde nichts überschrieben. Erst übernehmen,")
+            sag("   dann den Button erneut drücken.")
+            return
+    # ab hier gelten die Browser-Aktionen als übernommen
+    browser_aktionen = []
+
+    # 2) Neue Klassen-Ordner?
+    config_geaendert = False
+    for ordner, module in klassen_kandidaten(cfg, inhalt):
+        faecher, uebrig, problematisch = leite_faecher_ab(module)
+        sag(f"\n② Neuer Klassen-Ordner gefunden: {ordner.name}")
+        if problematisch:
+            sag(f"   ⚠️  Modul-Ordner mit Leerzeichen können NICHT verarbeitet werden: "
+                f"{', '.join(problematisch)}")
+            sag(f"      Bitte ohne Leerzeichen benennen (z. B. 'MINT 1' → 'MINT1').")
+        if not faecher:
+            sag("   → Keine verwertbaren Modul-Ordner — Klasse wird übersprungen.")
+            continue
+        for f in faecher:
+            mods = " / ".join(f["modul"].values())
+            sag(f"     Fach {f['name']:10s} → {mods}  ({f['accent']})")
+        if uebrig:
+            sag(f"     ⚠️  Mehr als 2 Module je Fach: {', '.join(uebrig)} — "
+                f"bitte von Hand in zugangsdaten.json einsortieren.")
+        antwort = frage(f"   Klasse {ordner.name} so anlegen? [j/N] ")
+        if antwort == "j":
+            passwort = verwaltung.neues_passwort(3)
+            cfg.setdefault("klassen", []).append(
+                {"key": ordner.name, "name": ordner.name,
+                 "passwort": passwort, "faecher": faecher})
+            for fach in faecher:
+                for name in fach["modul"].values():
+                    for b in ALLE_BEREICHE:
+                        (inhalt / ordner.name / name.replace(" ", "") / b).mkdir(
+                            parents=True, exist_ok=True)
+            verwaltung.speichere(cfg)
+            config_geaendert = True
+            sag(f"   ✅ Klasse {ordner.name} angelegt — Passwort: {passwort}")
+            sag(f"      (steht auch in: python3 verwaltung.py liste)")
+        else:
+            sag(f"   → übersprungen (Ordner wird ignoriert, bis die Klasse angelegt ist)")
+
+    # 2b) Unterlagen aus den Quellordnern holen (quellen.json im Dashboard-Ordner)
+    sync_skript = dashboard / "sync_inhalte.py"       # liegt im Dashboard-Ordner, nicht im Jahr
+    if not sync_skript.exists():
+        sag(f"⚠️  {sync_skript.name} fehlt im Dashboard-Ordner — neue LaTeX-Skripte werden NICHT geholt.")
+    else:
+        sag("② Hole Unterlagen aus den Quellordnern (LaTeX-Skripte) …")
+        r = subprocess.run([sys.executable, str(sync_skript)], cwd=str(dashboard),
+                           capture_output=True, text=True)
+        for zeile in (r.stdout or "").splitlines():
+            if zeile.strip():
+                sag("   " + zeile)
+        if r.returncode != 0:
+            sag((r.stderr or "").strip())
+            sys.exit("❌ Sync fehlgeschlagen — es wurde nichts veröffentlicht.")
+
+    # 3) Inventar + Warnungen
+    online, noten, warnungen = inventar(cfg, inhalt)
+    if warnungen:
+        sag("\n③ Hinweise:")
+        for w in warnungen:
+            sag(f"   ⚠️  {w}")
+
+    alt_online = stand_alt.get("online", {})
+    alt_noten = stand_alt.get("noten", {})
+    neu = sorted(set(online) - set(alt_online))
+    weg = sorted(set(alt_online) - set(online))
+    geaendert = sorted(k for k in set(online) & set(alt_online)
+                       if online[k] != alt_online[k])
+    noten_diff = (noten != alt_noten)
+
+    if stand_alt:
+        sag("\n④ Änderungen seit der letzten Veröffentlichung:")
+    else:
+        sag("\n④ Erste Veröffentlichung mit diesem Werkzeug — nehme alles auf:")
+    for k in neu[:15]:
+        sag(f"   + {k}")
+    if len(neu) > 15:
+        sag(f"   + … und {len(neu)-15} weitere")
+    for k in geaendert[:10]:
+        sag(f"   ~ {k}")
+    for k in weg[:10]:
+        sag(f"   − {k}")
+    if not (neu or geaendert or weg):
+        sag("   (keine Datei-Änderungen in den Online-Bereichen)")
+
+    # 4a) Admin-Archiv + CdM-Suche: hat sich in den CdM-Ordnern (New CdM, CdM, Dashboard-
+    #     Jahrgänge) irgendetwas geändert? Dann wird ebenfalls neu gebaut und veröffentlicht —
+    #     der Index im Portal bleibt so nie stehen.
+    archiv_alt = stand_alt.get("archiv")
+    archiv_neu, archiv_grund = archiv_stand(dashboard, jahr)
+    archiv_diff = archiv_neu is not None and archiv_neu != archiv_alt
+    if archiv_diff:
+        sag("   ~ Archiv/CdM-Suche: Dateien in den CdM-Ordnern haben sich geändert — Portal-Index wird erneuert")
+    elif archiv_neu is None:
+        if (dashboard / "suche_index.py").is_file():
+            sys.exit(f"❌ Archiv/CdM-Suche kann nicht geprüft werden: {archiv_grund}\n"
+                     f"   Es wurde nichts veröffentlicht — sonst bliebe die Portal-Suche unbemerkt veraltet. "
+                     f"Ursache beheben (OneDrive-Ordner erreichbar? 🔄 im Dashboard gerade aktiv?) und erneut versuchen.")
+        sag(f"   ℹ️  Archiv/CdM-Suche nicht eingerichtet ({archiv_grund})")
+
+    # 4) Kein Notendashboard für den CdM: die Chambre des Métiers bewertet über ihre
+    #    Plattform. Ein Noten-Ordner wird nur zur Kenntnis genommen und nie hochgeladen.
+    noten_ok = True
+    if noten_diff and noten:
+        sag(f"\nℹ️  {len(noten)} Datei(en) in Noten-Ordnern — bleiben offline (kein Notendashboard beim CdM).")
+
+    archiv_veroeffentlicht = [archiv_neu if archiv_neu is not None else archiv_alt]   # wird nach dem Build ersetzt
+
+    def speichere_stand():
+        STAND.write_text(json.dumps({
+            "online": online,
+            "noten": noten if noten_ok else alt_noten,
+            "browser_aktionen": browser_aktionen,
+            "archiv": archiv_veroeffentlicht[0],
+        }), encoding="utf-8")
+
+    # 5) Veröffentlichen — nur wenn nötig
+    # --erzwingen: auch ohne Datei-Änderung neu bauen und pushen. Nötig, wenn sich
+    # nur der CODE geändert hat (build.py / docs/index.html), nicht die Inhalte.
+    erzwingen = "--erzwingen" in sys.argv
+    if erzwingen:
+        sag("   (--erzwingen: baue und veröffentliche auch ohne Datei-Änderung)")
+    if not (neu or geaendert or weg or config_geaendert or erzwingen or archiv_diff):
+        sag("\n✅ Alles aktuell — nichts zu veröffentlichen "
+            + ("(Online-Bereiche und Archiv/Suche unverändert)." if archiv_neu is not None else "(Online-Bereiche unverändert)."))
+        speichere_stand()
+        return
+
+    sag("\n⑤ Baue verschlüsselt neu …")
+    r = subprocess.run([sys.executable, str(HIER / "build.py")])
+    if r.returncode != 0:
+        sys.exit("❌ build.py fehlgeschlagen — es wurde nichts veröffentlicht.")
+    # Gemerkt wird der Fingerabdruck des Archivs, das WIRKLICH gebaut wurde (index.json),
+    # nicht der vorab berechnete — so passt der Stand auch nach einer Änderung zwischendurch.
+    try:
+        gebaut = json.loads((HIER / "docs" / "vaults" / "index.json").read_text(encoding="utf-8"))
+        archiv_veroeffentlicht[0] = (gebaut.get("archiv") or {}).get("fp") or archiv_neu
+    except Exception:
+        archiv_veroeffentlicht[0] = None       # unbekannt → nächster Lauf prüft und baut neu
+
+    teile = []
+    if config_geaendert:
+        teile.append("neue Klasse(n)")
+    if neu:
+        teile.append(f"{len(neu)} neu")
+    if geaendert:
+        teile.append(f"{len(geaendert)} geändert")
+    if weg:
+        teile.append(f"{len(weg)} entfernt")
+    if archiv_diff:
+        teile.append("Admin-Archiv entfernt (nur noch Skripte online)")
+    nachricht = "Inhalte aktualisiert: " + ", ".join(teile)
+
+    sag("⑥ Veröffentliche …")
+    # bewusst NUR die Vault-Daten — sonst gingen halbfertige Änderungen an
+    # index.html o. Ä. ungeprüft mit online
+    git("add", "docs/vaults", "docs/.nojekyll")
+    andere = [z for z in git("status", "--porcelain", "--", "docs",
+                             fehler_ok=True).stdout.splitlines()
+              if z and not z[3:].startswith("docs/vaults")
+              and not z[3:].endswith(".nojekyll") and z[0] == " "]
+    if andere:
+        sag("   ℹ️  Lokal geändert, wird NICHT mitveröffentlicht "
+            "(bei Bedarf manuell committen):")
+        for z in andere[:5]:
+            sag(f"      {z[3:]}")
+    commit = git("commit", "-q", "-m", nachricht, fehler_ok=True)
+    if commit.returncode != 0 and "nothing to commit" not in (commit.stdout + commit.stderr):
+        sag(f"❌ git commit: {commit.stderr.strip()}")
+        sys.exit(1)
+    git("push", "-q", "origin", "main")
+
+    speichere_stand()
+    sag("\n✅ Fertig! In 1–2 Minuten online: https://temmchen.github.io/CdM/")
+    sag("   (Online sind nur die Skripte. Prüfungen, Aufgaben, Examen, Repêchage, Korrekturen und Organisation bleiben lokal.)")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sag("\nAbgebrochen — es wurde nichts veröffentlicht.")
